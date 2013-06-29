@@ -2,9 +2,9 @@ organization := "org.scalaz.stream"
 
 name := "scalaz-stream"
 
-version := "0.1-SNAPSHOT"
+version := "0.1.S1-SNAPSHOT"
 
-scalaVersion := "2.10.0"
+scalaVersion := "2.10.2"
 
 scalacOptions ++= Seq(
   "-feature",
@@ -29,11 +29,11 @@ libraryDependencies ++= Seq(
 resolvers ++= Seq(Resolver.sonatypeRepo("releases"), Resolver.sonatypeRepo("snapshots"))
 
 publishTo <<= (version).apply { v =>
-  val nexus = "https://oss.sonatype.org/"
+  val nexus = "https://maven.spinoco.com/"
   if (v.trim.endsWith("SNAPSHOT"))
-    Some("Snapshots" at nexus + "content/repositories/snapshots")
+    Some("Snapshots" at nexus + "nexus/content/repositories/snapshots")
   else
-    Some("Releases" at nexus + "service/local/staging/deploy/maven2")
+    Some("Releases" at nexus + "nexus/content/repositories/releases")
 }
 
 credentials += {
