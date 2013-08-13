@@ -2,7 +2,7 @@ organization := "org.scalaz.stream"
 
 name := "scalaz-stream"
 
-version := "0.1.S3-SNAPSHOT"
+version := "0.1.S4-SNAPSHOT"
 
 scalaVersion := "2.10.2"
 
@@ -20,9 +20,9 @@ conflictWarning ~= { cw =>
 }
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-core" % "7.1.0-SNAPSHOT",
-  "org.scalaz" %% "scalaz-concurrent" % "7.1.0-SNAPSHOT",
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.1.0-SNAPSHOT" % "test",
+  "org.scalaz" %% "scalaz-core" % "7.0.3",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.3",
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.3" % "test",
   "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
 )
 
