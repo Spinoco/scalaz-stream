@@ -81,8 +81,6 @@ object ProcessSpec extends Properties("Process1") {
     val tasks = Process(Task(1), Task(2), Task(throw Err), Task(3))
     (try { tasks.eval.pipe(processes.sum).collect.run; false }
      catch { case Err => true }) &&
-    (try { io.collectTask(tasks.eval.pipe(processes.sum)); false }
-     catch { case Err => true }) &&
     (tasks.eval.pipe(processes.sum).
       handle { case e: Throwable => -6 }.
       collect.run.last == -6)
@@ -118,28 +116,16 @@ object ProcessSpec extends Properties("Process1") {
       forall { case (actual,expected) => (actual - expected).abs < 500L }
   }
 
-  property("actor.queue") = forAll { l: List[Int] => 
-    val (q, s) = actor.queue[Int]
-    import message.queue._
-    val t1 = Task { 
-      l.foreach(i => q ! enqueue(i))
-      q ! close
-    }
-    val t2 = s.collect
-
-    Nondeterminism[Task].both(t1, t2).run._2.toList == l
+  property("range") = secure {
+    Process.range(0, 100).collect.run == IndexedSeq.range(0, 100) &&
+    Process.range(0, 1).collect.run == IndexedSeq.range(0, 1) && 
+    Process.range(0, 0).collect.run == IndexedSeq.range(0, 0) 
   }
 
-  property("actor.variable") = forAll { l: List[Int] => 
-    val (v, s) = actor.variable[Int]
-    import message.variable._
-    val t1 = Task { 
-      l.foreach { i => v ! set(i); Thread.sleep(1) }
-      v ! close
-    }
-    val t2 = s.takeWhile(_ % 23 != 0).collect
-
-    Nondeterminism[Task].both(t1, t2).run._2.toList.forall(_ % 23 != 0)
+  property("ranges") = forAll(Gen.choose(1, 101)) { size => 
+    Process.ranges(0, 100, size).flatMap { case (i,j) => emitSeq(i until j) }.collect.run ==
+    IndexedSeq.range(0, 100)
   }
+
 }
 
