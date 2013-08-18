@@ -78,7 +78,11 @@ sealed abstract class Process[+F[_],+O] {
    */
   final def append[F2[x]>:F[x], O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
     case h@Halt(e) => e match { 
-      case End => p2
+      case End => 
+        try p2
+        catch { case End => h
+                case e2: Throwable => Halt(e2) 
+              }
       case _ => h
     }
     case Emit(h, t) => emitSeq(h, t append p2)
@@ -211,7 +215,11 @@ sealed abstract class Process[+F[_],+O] {
   final def onComplete[F2[x]>:F[x],O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
     case Await(req,recv,fb,c) => Await(req, recv andThen (_.onComplete(p2)), fb.onComplete(p2), c.onComplete(p2))
     case Emit(h, t) => Emit(h, t.onComplete(p2))
-    case h@Halt(e) => p2.causedBy(e)
+    case h@Halt(e) => 
+      try p2.causedBy(e)
+      catch { case End => h
+              case e2: Throwable => Halt(CausedBy(e2, e)) 
+            }
   }
 
   /**
@@ -498,14 +506,10 @@ sealed abstract class Process[+F[_],+O] {
            F.bind (C.attempt(req.asInstanceOf[F2[AnyRef]])) {
              _.fold(
                { case End => go(fb.asInstanceOf[Process[F2,O2]], acc)
-                 case err => c match {
-                   case Halt(e) => e match {
-                     case End => C.fail(err)
-                     case _ => C.fail(CausedBy(e, err))
-                   }
-                   case _ => go(c.asInstanceOf[Process[F2,O2]] ++ wrap(C.fail(err)), Vector())
-                 }
-               }, o => go(recv.asInstanceOf[AnyRef => Process[F2,O2]](o), acc))
+                 case e => go(c.asInstanceOf[Process[F2,O2]].causedBy(e), acc)
+               },
+               o => go(recv.asInstanceOf[AnyRef => Process[F2,O2]](o), acc)
+             )
            }
       }
     go(this, Vector[O2]())
@@ -800,7 +804,17 @@ object Process {
     override def fillInStackTrace = this
   }
 
-  case class CausedBy(e: Throwable, cause: Throwable) extends Exception
+  class CausedBy(e: Throwable, cause: Throwable) extends Exception {
+    override def toString = s"$e\n\ncaused by:\n\n$cause"
+  }
+  
+  object CausedBy {
+    def apply(e: Throwable, cause: Throwable): Throwable = 
+      cause match {
+        case End => e
+        case _ => new CausedBy(e, cause) 
+      }
+  }
 
   case class Env[-I,-I2]() {
     sealed trait Y[-X] { def tag: Int }
@@ -967,10 +981,8 @@ object Process {
     def toSortedMap[K,V](implicit isKV: O <:< (K,V), ord: Ordering[K]): SortedMap[K,V] =
       SortedMap(toIndexedSeq.asInstanceOf[Seq[(K,V)]]: _*)
     def toStream: Stream[O] = toIndexedSeq.toStream
-    def toSource: Process[Task,O] = {
-      val iter = toIndexedSeq.iterator
-      repeatWrap { Task.delay { if (iter.hasNext) iter.next else throw End }}
-    }
+    def toSource: Process[Task,O] = 
+      emitSeq(toIndexedSeq.map(o => Task.delay(o))).eval
   }
 
   /**
