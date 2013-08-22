@@ -4,6 +4,7 @@ import collection.immutable.Vector
 import java.nio.charset.Charset
 
 import scalaz.{\/, -\/, \/-, Monoid, Semigroup, Equal}
+import scalaz.\/._
 import scalaz.syntax.equal._
 
 import Process._
@@ -58,6 +59,45 @@ trait process1 {
       } orElse (emit(acc))
     go(Vector(), false)
   }
+
+  /** 
+   * Emit the given values, then echo the rest of the input. This is 
+   * useful for feeding values incrementally to some other `Process1`:
+   * `init(1,2,3) |> p` returns a version of `p` which has been fed
+   * `1, 2, 3`.
+   */
+  def init[I](head: I*): Process1[I,I] =
+    emitSeq(head) ++ id
+
+  /** 
+   * Transform `p` to operate on the left hand side of an `\/`, passing
+   * through any values it receives on the right. Note that this halts
+   * whenever `p` halts. 
+   */
+  def liftL[A,B,C](p: Process1[A,B]): Process1[A \/ C, B \/ C] = 
+    p match {
+      case h@Halt(_) => h
+      case Emit(h, t) => Emit(h map left, liftL(t))
+      case _ => await1[A \/ C].flatMap {
+        case -\/(a) => liftL(init(a) pipe p)  
+        case \/-(c) => emit(right(c)) ++ liftL(p) 
+      }
+    }
+
+  /** 
+   * Transform `p` to operate on the right hand side of an `\/`, passing
+   * through any values it receives on the left. Note that this halts
+   * whenever `p` halts.
+   */
+  def liftR[A,B,C](p: Process1[B,C]): Process1[A \/ B, A \/ C] = 
+    lift((e: A \/ B) => e.swap) |> liftL(p).map(_.swap)
+
+  /**
+   * Split the input and send to either `chan1` or `chan2`, halting when
+   * either branch halts.
+   */
+  def multiplex[I,I2,O](chan1: Process1[I,O], chan2: Process1[I2,O]): Process1[I \/ I2, O] =
+    (liftL(chan1) pipe liftR(chan2)).map(_.fold(identity, identity))
 
   /**
    * Break the input into chunks where the delimiter matches the predicate.

@@ -11,14 +11,13 @@ import Prop._
 
 import scalaz.concurrent.Task
 
-object ActorSpec extends Properties("actor") {
+object AsyncSpec extends Properties("async") {
   
   property("queue") = forAll { l: List[Int] => 
-    val (q, s) = actor.queue[Int]
-    import message.queue._
+    val (q, s) = async.queue[Int]
     val t1 = Task { 
-      l.foreach(i => q ! enqueue(i))
-      q ! close
+      l.foreach(i => q.enqueue(i))
+      q.close
     }
     val t2 = s.collect
 
@@ -26,11 +25,10 @@ object ActorSpec extends Properties("actor") {
   }
 
   property("ref") = forAll { l: List[Int] => 
-    val (v, s) = actor.ref[Int]
-    import message.ref._
+    val (v, s) = async.ref[Int]
     val t1 = Task { 
-      l.foreach { i => v ! set(i); Thread.sleep(1) }
-      v ! close
+      l.foreach { i => v.set(i); Thread.sleep(1) }
+      v.close
     }
     val t2 = s.takeWhile(_ % 23 != 0).collect
 

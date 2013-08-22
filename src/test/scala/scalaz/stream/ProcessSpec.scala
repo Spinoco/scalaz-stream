@@ -106,6 +106,14 @@ object ProcessSpec extends Properties("Process1") {
       forall { case (actual,expected) => (actual - expected).abs < 500L }
   }
 
+  property("forwardFill") = secure {
+    import concurrent.duration._
+    val t2 = Process.awakeEvery(2 seconds).forwardFill.zip {
+             Process.awakeEvery(100 milliseconds).take(100)
+           }.run.run 
+    true
+  }
+
   property("range") = secure {
     Process.range(0, 100).collect.run == IndexedSeq.range(0, 100) &&
     Process.range(0, 1).collect.run == IndexedSeq.range(0, 1) && 
