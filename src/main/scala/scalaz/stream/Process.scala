@@ -448,7 +448,6 @@ sealed abstract class Process[+F[_],+O] {
         }
     }
     catch { case e: Throwable => 
-      println("caught: " + e)
       this.kill onComplete p2.kill onComplete (Halt(e))
     }
   }
@@ -465,19 +464,25 @@ sealed abstract class Process[+F[_],+O] {
    * Catch exceptions produced by this `Process`, not including normal termination,
    * and uses `f` to decide whether to resume a second process. 
    */
-  def attempt[F2[x]>:F[x],O2](f: Throwable => Process[F2,O2])(implicit F: Catchable[F2]): Process[F2, O \/ O2] =
+  def attempt[F2[x]>:F[x],O2](f: Throwable => Process[F2,O2] = (t:Throwable) => emit(t))(
+                              implicit F: Catchable[F2]): Process[F2, O2 \/ O] =
   this match {
-    case Emit(h, t) => Emit(h map (left), t.attempt[F2,O2](f))
+    case Emit(h, t) => Emit(h map (right), t.attempt[F2,O2](f))
     case Halt(e) => e match {
       case End => halt
-      case _ => try f(e).map(right) 
+      case _ => try f(e).map(left) 
                 catch { case End => halt
                         case e2: Throwable => Halt(CausedBy(e2, e))
                       }
     }
     case Await(req, recv, fb, c) =>
       await(F.attempt(req))(
-        _.fold(err => c.drain onComplete f(err).map(right), recv andThen (_.attempt[F2,O2](f))),
+        _.fold(
+          { case End => fb.attempt[F2,O2](f)
+            case err => c.drain onComplete f(err).map(left) 
+          }, 
+          recv andThen (_.attempt[F2,O2](f))
+        ),
         fb.attempt[F2,O2](f), c.attempt[F2,O2](f))
   }
 
@@ -487,12 +492,14 @@ sealed abstract class Process[+F[_],+O] {
    * emitted before the error.
    */
   def handle[F2[x]>:F[x],O2](f: PartialFunction[Throwable, Process[F2,O2]])(implicit F: Catchable[F2]): Process[F2, O2] =
-    attempt(err => f.lift(err).getOrElse(fail(err))).dropWhile(_.isLeft).map(_.getOrElse(sys.error("unpossible"))) 
+    attempt(err => f.lift(err).getOrElse(fail(err))).
+    dropWhile(_.isRight).
+    map(_.fold(identity, _ => sys.error("unpossible")))
 
   /**
    * Like `attempt`, but accepts a partial function. Unhandled errors are rethrown.
    */
-  def partialAttempt[F2[x]>:F[x],O2](f: PartialFunction[Throwable, Process[F2,O2]])(implicit F: Catchable[F2]): Process[F2, O \/ O2] =
+  def partialAttempt[F2[x]>:F[x],O2](f: PartialFunction[Throwable, Process[F2,O2]])(implicit F: Catchable[F2]): Process[F2, O2 \/ O] =
     attempt(err => f.lift(err).getOrElse(fail(err)))
 
   /**
@@ -757,6 +764,16 @@ object Process {
       o.map(ht => Emit(List(ht._1), unfold(ht._2)(f))).
         getOrElse(halt)
     )
+
+  /** 
+   * Produce a stream encapsulating some state, `S`. At each step, 
+   * produces the current state, and an effectful function to set the
+   * state that will be produced next step.
+   */
+  def state[S](s0: S): Process[Task, (S, S => Task[Unit])] = suspend {
+    val (v, p) = async.localRef[S]
+    p.take(1).map(s => (s, (s: S) => Task.delay(v.set(s)))).repeat 
+  }
   
   /** 
    * A continuous stream of the elapsed time, computed using `System.nanoTime`. 
@@ -1143,6 +1160,12 @@ object Process {
      */
     def liftR[I0]: Process1[I0 \/ I, I0 \/ O] = 
       process1.liftR(self)
+
+    /** 
+     * Feed a single input to this `Process1`.
+     */
+    def feed1(i: I): Process1[I,O] = 
+      process1.feed1(i)(self)
   }
 
   /**
