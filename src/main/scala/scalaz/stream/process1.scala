@@ -108,8 +108,30 @@ trait process1 {
         try recv(i)
         catch {
           case End => fb 
-          case e: Throwable => c
+          case e: Throwable => c.causedBy(e)
         }
+    }
+
+  /** Feed a sequence of inputs to a `Process1`. */
+  def feed[I,O](i: Seq[I])(p: Process1[I,O]): Process1[I,O] = 
+    p match {
+      case Halt(_) => p
+      case Emit(h, t) => Emit(h, feed(i)(t))
+      case _ => 
+        var buf = i
+        var cur = p
+        var ok = true
+        while (!buf.isEmpty && ok) {
+          val h = buf.head
+          buf = buf.tail
+          cur = feed1(h)(cur)
+          cur match {
+            case Halt(_)|Emit(_,_) => ok = false 
+            case _ => ()
+          }
+        }
+        if (buf.isEmpty) cur
+        else feed(buf)(cur)
     }
 
   /** 
@@ -255,6 +277,13 @@ trait process1 {
 
   /** Reads a single element of the input, emits nothing, then halts. */
   def skip: Process1[Any,Nothing] = await1[Any].flatMap(_ => halt)
+
+  /** Remove any `None` inputs. */
+  def stripNone[A]: Process1[Option[A],A] = 
+    await1[Option[A]].flatMap {
+      case None => stripNone
+      case Some(a) => emit(a) ++ stripNone
+    }
 
   /**
    * Emit a running sum of the values seen so far. The first value emitted will be the

@@ -8,6 +8,7 @@ import scalaz.concurrent.{Strategy, Task}
 import scalaz.Leibniz.===
 import scalaz.{\/,-\/,\/-,~>,Leibniz,Equal}
 import \/._
+import These.{This,That}
 
 import java.util.concurrent._
 
@@ -361,16 +362,16 @@ sealed abstract class Process[+F[_],+O] {
               case 0 => // Left
                 val recv_ = recv.asInstanceOf[O => Wye[O,O2,O3]]
                 (e: These[O,O2]) => e match {
-                  case These.This(o) => (None, Some(recv_(o)))
-                  case These.That(_) => (None, None)
-                  case These.Both(o,o2) => (Some(These.That(o2)), Some(recv_(o)))
+                  case This(o) => (None, Some(recv_(o)))
+                  case That(_) => (None, None)
+                  case These(o,o2) => (Some(That(o2)), Some(recv_(o)))
                 }
               case 1 => // Right
                 val recv_ = recv.asInstanceOf[O2 => Wye[O,O2,O3]]
                 (e: These[O,O2]) => e match {
-                  case These.This(_) => (None, None)
-                  case These.That(o2) => (None, Some(recv_(o2)))
-                  case These.Both(o,o2) => (Some(These.This(o)), Some(recv_(o2)))
+                  case This(_) => (None, None)
+                  case That(o2) => (None, Some(recv_(o2)))
+                  case These(o,o2) => (Some(This(o)), Some(recv_(o2)))
                 }
               case 2 => // Both
                 val recv_ = recv.asInstanceOf[These[O,O2] => Wye[O,O2,O3]]
@@ -1092,6 +1093,39 @@ object Process {
     }
   }
 
+  implicit class SplitProcessSyntax[F[_],A,B](self: Process[F, A \/ B]) {
+
+    /** Feed the left side of this `Process` through the given `Channel`, using `q` to control the queueing strategy. */
+    def connectL[F2[x]>:F[x],A2,O](chan: Channel[F2,A,A2])(q: Wye[B,A2,O])(implicit F2: Nondeterminism[F2]): Process[F2,O] = {
+      val p: Process[F2, (Option[B], F2[Option[A2]])] = 
+        self.zipWith(chan) { (ab,f) => 
+          ab.fold(a => (None, F2.map(f(a))(Some(_))), 
+                  b => (Some(b), F2.pure(None)))
+        }
+      p map { (p: (Option[B], F2[Option[A2]])) => (p._1, (o2: Option[B]) => p._2) } enqueue (
+        q.attachL(process1.stripNone[B]).attachR(process1.stripNone[A2])
+      )
+    }
+
+    /** Feed the right side of this `Process` through the given `Channel`, using `q` to control the queueing strategy. */
+    def connectR[F2[x]>:F[x],B2,O](chan: Channel[F2,B,B2])(q: Wye[A,B2,O])(implicit F2: Nondeterminism[F2]): Process[F2,O] =
+      self.map(_.swap).connectL(chan)(q)
+
+    /** 
+     * Feed the left side of this `Process` to a `Sink`, allowing up to `maxUnacknowledged`
+     * elements to enqueue at the `Sink` before blocking on the `Sink`. 
+     */
+    def drainL[F2[x]>:F[x]](maxUnacknowledged: Int)(s: Sink[F2,A])(implicit F2: Nondeterminism[F2]): Process[F2,B] =
+      self.connectL(s)(wye.drainR(maxUnacknowledged)) 
+
+    /** 
+     * Feed the right side of this `Process` to a `Sink`, allowing up to `maxUnacknowledged`
+     * elements to enqueue at the `Sink` before blocking on the `Sink`. 
+     */
+    def drainR[F2[x]>:F[x]](maxUnacknowledged: Int)(s: Sink[F2,B])(implicit F2: Nondeterminism[F2]): Process[F2,A] =
+      self.connectR(s)(wye.drainR(maxUnacknowledged)) 
+  }
+
   /**
    * This class provides infix syntax specific to `Process[Task, _]`.
    */
@@ -1214,7 +1248,7 @@ object Process {
       case Await(req, recv, fb, c) => (req.tag: @annotation.switch) match {
         case 0 => fb.detachL
         case 1 => Await(Get[I2], recv andThen (_ detachL), fb.detachL, c.detachL)
-        case 2 => Await(Get[I2], (These.That(_:I2)) andThen recv andThen (_ detachL), fb.detachL, c.detachL)
+        case 2 => Await(Get[I2], (That(_:I2)) andThen recv andThen (_ detachL), fb.detachL, c.detachL)
       }
     }
 
@@ -1229,9 +1263,21 @@ object Process {
       case Await(req, recv, fb, c) => (req.tag: @annotation.switch) match {
         case 0 => Await(Get[I], recv andThen (_ detachR), fb.detachR, c.detachR)
         case 1 => fb.detachR
-        case 2 => Await(Get[I], (These.This(_:I)) andThen recv andThen (_ detachR), fb.detachR, c.detachR)
+        case 2 => Await(Get[I], (This(_:I)) andThen recv andThen (_ detachR), fb.detachR, c.detachR)
       }
     }
+
+    /** 
+     * Transform the left input of the given `Wye` using a `Process1`. 
+     */
+    def attachL[I0](f: Process1[I0,I]): Wye[I0, I2, O] = 
+      wye.attachL(f)(self)
+
+    /** 
+     * Transform the right input of the given `Wye` using a `Process1`. 
+     */
+    def attachR[I1](f: Process1[I1,I2]): Wye[I, I1, O] = 
+      wye.attachR(f)(self)
 
     /** Transform the left input to a `Wye`. */
     def contramapL[I0](f: I0 => I): Wye[I0, I2, O] =
@@ -1286,7 +1332,7 @@ object Process {
               case _ => (None, None)
             }}
             val (q2, bufIn2) = q1.feed(bufIn1) { q => o => q match {
-              case AwaitBoth(recv,fb,c) => (None, Some(recv(These.This(o))))
+              case AwaitBoth(recv,fb,c) => (None, Some(recv(This(o))))
               case _ => (None, None)
             }}
             q2 match {
@@ -1318,7 +1364,7 @@ object Process {
                       await(F3.choose(reqsrc, outH))(
                         _.fold(
                           { case (p,ro) => go(recvsrc(p), q2, bufIn2, ro +: outT) },
-                          { case (rp,o2) => go(await(rp)(recvsrc, fbsrc, csrc), recv(These.That(o2)), bufIn2, outT) }
+                          { case (rp,o2) => go(await(rp)(recvsrc, fbsrc, csrc), recv(That(o2)), bufIn2, outT) }
                         ),
                         go(fbsrc, q2, bufIn2, bufOut),
                         go(csrc, q2, bufIn2, bufOut)
