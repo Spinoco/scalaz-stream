@@ -1,8 +1,14 @@
-organization := "org.scalaz.stream"
+organization := "spinoco"
 
 name := "scalaz-stream"
 
-version := "0.1.S13-SNAPSHOT"
+version := (Option(System.getenv("BUILD_NUMBER")) orElse (Option(System.getProperty("BUILD_NUMBER")))).map(buildNo => {
+                             "0.1.0." +  buildNo + "-SNAPSHOT"
+                           }).getOrElse({
+                             val df = new java.text.SimpleDateFormat("yyMMddHHmmss")
+                             "0.1.0.T" + df.format(new java.util.Date()) + "-SNAPSHOT"
+                           })
+                         
 
 scalaVersion := "2.10.2"
 
