@@ -1,15 +1,15 @@
 package scalaz.stream
 
-import scalaz.{Functor, Apply, \/-, \/}
+import scalaz.\/
 import scalaz.\/._
 import scalaz.concurrent._
 import java.util.concurrent.atomic._
 
 import scalaz.stream.Process._
-import scala.Some
+import scala.Some 
 
 trait async {
-  import async.{Queue,Ref,Signal}
+  import async.{Queue,Ref,Signal,Topic}
 
   /** 
    * Convert from an `Actor` accepting `message.queue.Msg[A]` messages 
@@ -46,37 +46,13 @@ trait async {
       def isSet = init
     }
 
-
-
   /** 
    * Create a new continuous signal which may be controlled asynchronously.
-   * Signal may create multiple type of processes 
-   * that are all controlled by single asynchronous reference
+   * All views into the returned signal are backed by the same underlying
+   * asynchronous `Ref`.
    */
-  def signal[A](implicit S: Strategy = Strategy.DefaultStrategy): Signal[A] = {
-    
-    new Signal[A] { 
-      
-      val value: Ref[A] = ref[A](S)
-
-      def checkStampChange:Process1[(Int,A),Boolean] = {
-        def go(last:(Int,A)) : Process1[(Int,A),Boolean] = {
-          await1[(Int,A)].flatMap ( next => emit(next != last) then go(next) )
-        }
-        await1[(Int,A)].flatMap(next=> emit(true) then go(next))
-      }
-      
-      def changed =  value.toStampedSource |> checkStampChange 
-       
-      def discrete = value.toDiscreteSource
- 
-      def continuous = value.toSource
- 
-      def changes = value.toStampedDiscreteSource.map(_=>())
-    }
-     
-    
-  }
+  def signal[A](implicit S: Strategy = Strategy.DefaultStrategy): Signal[A] =
+    ref[A].signal
     
   /** 
    * Create a source that may be added to or halted asynchronously 
@@ -119,6 +95,20 @@ trait async {
    */
   def ref[A](implicit S: Strategy = Strategy.DefaultStrategy): Ref[A] = 
     actor.ref[A](S) match { case (snk, p) => actorRef(snk)}
+
+  /**
+   * Returns a topic, that can create publisher (sink) and subscriber (source)
+   * processes that can be used to publish and subscribe asynchronously. 
+   * Please see `Topic` for further info.
+   */
+  def topic[A,B](implicit S: Strategy = Strategy.DefaultStrategy): Topic[A,B] = {
+    val (a, s) = actor.topic[A,B](S)
+    
+    new Topic[A,B]{
+      private[stream] val actor = a
+      val subscribers = s
+    }
+  }
 
   /** 
    * Convert an `Queue[A]` to a `Sink[Task, A]`. The `cleanup` action will be 
@@ -190,24 +180,14 @@ object async extends async {
       async.toSink(this, cleanup)
   }
 
-  trait Ref[A] {
+  trait Ref[A] { self =>
      
-   
-    protected[stream] def set_(f:Option[A] => Option[A],
-                               cb:(Throwable \/ Option[A]) => Unit =  (_) => (),
-                               old:Boolean ) : Unit
-
-    protected[stream] def get_(cb: (Throwable \/  (Int,A)) => Unit, onlyChanged:Boolean, last:Int) : Unit
-
-    protected[stream] def fail_(t:Throwable, cb:Throwable => Unit = _ => ())
     
-
     /**
      * Get the current value of this `Ref`. If this
      * `Ref` has not been `set`, the callback will be invoked later.
      */
     def get(cb: (Throwable \/ A) => Unit): Unit = get_(r=>cb(r.map(_._2)),false,0)
-
 
     /**
      * Modify the current value of this `Ref`. If this `Ref`
@@ -254,9 +234,7 @@ object async extends async {
 
 
     /**
-     * Sets the value inside this `ref`. If this is the first time the `Ref`
-     * is `set`, this triggers evaluation of any `onRead` actions registered
-     * with the `Ref`. If `Ref` is finished or `failed` this is no-op.  
+     * Sets the value inside this `ref`.  
      */
     def set(a: A): Unit =
       set_ (_ => Some(a), old = false)
@@ -268,158 +246,304 @@ object async extends async {
      */
     def isSet: Boolean
 
-    /**
-     * Return a continuous stream which emits the current value in this `Ref`. 
-     * Note that the `Ref` is left 'open'. If you wish to ensure that the value
-     * cannot be used afterward, use the idiom 
-     * `r.toSource onComplete Process.wrap(Task.delay(r.close)).drain`
-     */
-    def toSource: Process[Task,A] =
-      Process.repeatWrap[Task,A](async.get)
+    def signal: Signal[A] = new Signal[A] {
 
-    /**
-     * Returns a discrete stream, which emits the current value of this `Ref`, 
-     * but only when the `Ref` changes, except for very first emit, which is 
-     * emitted immediately once run, or after `ref` is set for the fist time . 
-     *  
-     */
-    def toDiscreteSource: Process[Task,A] = 
-      toStampedDiscreteSource.map(_._2)
-
-    /**
-     * Unlike the `toSource` will emit values with their stamp.
-     * @return
-     */
-    def toStampedSource: Process[Task,(Int,A)] =
-      Process.repeatWrap[Task,(Int,A)](async.getStamped)
-
-
-    /**
-     * Discrete (see `toDiscreteSource`) variant of `toStampedSource`
-     * @return
-     */
-    def toStampedDiscreteSource: Process[Task,(Int,A)] =  {
-      /* The implementation here may seem a redundant a bit, but we need to keep
-       * own serial number to make sure the Get events has own context for
-       * every `toStampedDiscreteSource` process. 
+      val value:Ref[A] = self
+      
+      lazy val changed:Process[Task,Boolean] =  toStampedSource |> checkStampChange
+   
+      lazy val discrete: Process[Task,A] = toDiscreteSource
+    
+      lazy val continuous:Process[Task,A] = toSource
+      
+      lazy val changes:Process[Task,Unit] = toStampedDiscreteSource.map(_=>())
+      
+      
+      ////
+      //// PRIVATE scalaz-stream
+      
+      /*
+       * Process1 that keeps track of last serial and value and will emit true
+       * when the newly emitted value from signal changes
        */
-      def go(ser:Int, changed:Boolean): Process[Task,(Int,A)] =
-        await[Task,(Int,A),(Int,A)](Task.async { cb => get_(cb,changed,ser) })(sa => emit(sa) ++ go(sa._1, true),halt, halt)
+      private[stream] def checkStampChange:Process1[(Int,A),Boolean] = {
+        def go(last:(Int,A)) : Process1[(Int,A),Boolean] = {
+          await1[(Int,A)].flatMap ( next => emit(next != last) then go(next) )
+        }
+        await1[(Int,A)].flatMap(next=> emit(true) then go(next))
+      }
+      
+      private[stream] def toSource: Process[Task,A] =
+        Process.repeatWrap[Task,A](Task.async[A](value.get))
 
-      go(0,false)
+      /*
+       * Returns a discrete stream, which emits the current value of this `Ref`, 
+       * but only when the `Ref` changes, except for very first emit, which is 
+       * emitted immediately once run, or after `ref` is set for the fist time . 
+       *  
+       */
+      private[stream] def toDiscreteSource: Process[Task,A] = 
+        toStampedDiscreteSource.map(_._2)
+
+      /*
+       * Unlike the `toSource` will emit values with their stamp.
+       */
+      private[stream] def toStampedSource: Process[Task,(Int,A)] =
+        Process.repeatWrap[Task,(Int,A)](Task.async[(Int,A)](self.get_(_,false,0)))
+
+
+      /*
+       * Discrete (see `toDiscreteSource`) variant of `toStampedSource`
+       */
+      private[stream] def toStampedDiscreteSource: Process[Task,(Int,A)] =  {
+        /* The implementation here may seem a redundant a bit, but we need to keep
+         * own serial number to make sure the Get events has own context for
+         * every `toStampedDiscreteSource` process. 
+         */
+        def go(ser:Int, changed:Boolean): Process[Task,(Int,A)] =
+          await[Task,(Int,A),(Int,A)](Task.async { cb => get_(cb,changed,ser) })(sa => emit(sa) ++ go(sa._1, true),halt, halt)
+
+        go(0,false)
+      }
     }
-   
 
-    /**
-     * Returns asynchronous version of this `Ref`. Modifications are performed
-     * at the time when the resulting tasks are run. 
-     *
-     * If the `Ref` is in `finished` or `failed` state, tasks will fail with 
-     * respective state (`End` or `Throwable`) as their cause, 
-     * except for close and fail, that will never fail.
-     * @return
-     */
-    lazy val  async : AsyncRef[A] = new AsyncRef[A] {protected val ref = Ref.this}
-   
+    ////
+    //// PRIVATE
+
+    private[stream] def set_(f:Option[A] => Option[A],
+                               cb:(Throwable \/ Option[A]) => Unit =  (_) => (),
+                               old:Boolean ) : Unit
+
+    private[stream] def get_(cb: (Throwable \/  (Int,A)) => Unit, onlyChanged:Boolean, last:Int) : Unit
+
+    private[stream] def fail_(t:Throwable, cb:Throwable => Unit = _ => ())
+
 
   }
 
 
-  trait AsyncRef[A] {
-    protected val ref:Ref[A]
-    /**
-     * Like a [[scalaz.stream.async.Ref.get]],
-     * only the value is get asynchronously when the resulting task will be run
-     */
-    def get : Task[A] = Task.async[A](ref.get)
-
-    /**
-     * Like a [[scalaz.stream.async.Ref.get]],
-     * only the value is get asynchronously when the resulting task will be run 
-     * and contains also the stamp of current value 
-     * @return
-     */
-    def getStamped :Task[(Int,A)] = Task.async[(Int,A)](ref.get_(_,false,0))
-
-    /**
-     * Like [[scalaz.stream.async.Ref.getAndSet]],
-     * but unlike it it sets the value asynchronously when the resulting task is run 
-     */
-    def getAndSet(a:A) : Task[Option[A]] = Task.async[Option[A]](ref.getAndSet(a, _))
-
-    /**
-     * like [[scalaz.stream.async.Ref.compareAndSet]],
-     * but will be executed asynchronously, when resulting task is run
-     */
-    def compareAndSet(f: Option[A] => Option[A]) : Task[Option[A]] = Task.async[Option[A]](ref.compareAndSet(f, _))
-
-    /**
-     * Like [[scalaz.stream.async.Ref.close]],  
-     * but will be executed asynchronously, when resulting task is run
-     */
-    def close : Task[Unit] = fail(End)
-
-    /**
-     * Same as [[scalaz.stream.async.Ref.fail]],
-     * but the operation is done asynchronously when the task is run. 
-     */
-    def fail(error:Throwable):Task[Unit] =
-      Task.async[Unit] ( cb =>  ref.fail_(error,_=>cb(right(()))))
-
-    /**
-     * Same as [[scalaz.stream.async.Ref.set]],
-     * only that it will be set when the resulting task is run 
-     */
-    def set(a:A) : Task[Unit] =
-      compareAndSet(_=>Some(a)).map(_=>()) 
-
-    /**
-     * Same as [[scalaz.stream.async.Ref.isSet]],
-     * but the operation is done asynchronously when the task is run. 
-     * @return
-     */
-    def isSet: Task[Boolean] = Task.delay(ref.isSet)
-  }
+  
   
   /** 
    * A signal whose value may be set asynchronously. Provides continuous 
    * and discrete streams for responding to changes to this value. 
    */
-  trait Signal[A]  {
+  trait Signal[A] extends ReadOnlySignal[A]  { self =>
+
+    /**
+     * Returns sink that can be used to set this signal
+     */
+    def sink: Sink[Task,Signal.Msg[A]] = Process.repeatWrap[Task,Signal.Msg[A] => Task[Unit]] (Task.now{(msg:Signal.Msg[A]) =>
+      import Signal._
+      msg match {
+        case Set(a) =>  self.set(a)
+        case CompareAndSet(f) => self.compareAndSet(f).map(_=>())
+        case Fail(err) =>  self.fail(err)
+      }
+    })
+    
+    /** 
+     * Asynchronously refreshes the value of the signal, 
+     * keep the value of this `Signal` the same, but notify any listeners.
+     * If the `Signal` is not yet set, this is no-op
+     */
+    def refresh: Task[Unit] = compareAndSet(oa=>oa).map(_=>())
+
+    /**
+     * Asynchronously get the current value of this `Signal`
+     */
+    def get : Task[A] = Task.async[A](value.get)
+
+
+    /**
+     * Sets the value of this `Signal`. 
+     */
+    def set(a:A) : Task[Unit] =  compareAndSet(_=>Some(a)).map(_=>())
+
+    /**
+     * Asynchronously sets the current value of this `Signal` and returns previous value of the `Signal`. 
+     * If this `Signal` has not been set yet, the Task will return None and value is set. If this `Signal`
+     * is `finished` Task will fail with `End` exception. If this `Signal` is `failed` Task will fail 
+     * with `Signal` failure exception.
+     *
+     */
+    def getAndSet(a:A) : Task[Option[A]] =  Task.async[Option[A]](value.getAndSet(a, _))
+
+    /**
+     * Asynchronously sets the current value of this `Signal` and returns new value os this `Signal`.
+     * If this `Signal` has not been set yet, the Task will return None and value is set. If this `Signal`
+     * is `finished` Task will fail with `End` exception. If this `Signal` is `failed` Task will fail 
+     * with `Signal` failure exception.
+     * 
+     * Furthermore if `f` results in evaluating to None, this Task is no-op and will return current value of the 
+     * `Signal`.
+     * 
+     */
+    def compareAndSet(f: Option[A] => Option[A]) : Task[Option[A]] = Task.async[Option[A]](value.compareAndSet(f, _))
+
+    /**
+     * Indicate that the value is no longer valid. Any attempts to `set` or `get` this
+     * `Signal` after a `close` will fail with `End` exception. This `Signal` is `finished` from now on.
+     * 
+     * Running this task once the `Signal` is `failed` or `finished` is no-op and this task will not fail. 
+     */
+    def close : Task[Unit] = fail(End)
+
+    /**
+     * Raise an asynchronous error for readers of this `Signal`. Any attempts to 
+     * `set` or `get` this `Ref` after the `fail` will result in task failing with `error`. 
+     * This `Signal` is `failed` from now on. 
+     * 
+     * Running this task once the `Signal` is `failed` or `finished` is no-op and this task will not fail. 
+     */
+    def fail(error:Throwable):Task[Unit] = Task.async[Unit] ( cb =>  value.fail_(error,_=>cb(right(()))))
 
     /** The value of this `Signal`. May be set asynchronously. */
     def value: Ref[A]
+    
+  }
 
-    /** 
+ /**
+   * Signal that can be only `read` 
+   */
+  trait ReadOnlySignal[A] {
+
+
+    /**
      * Returns a continuous stream, indicating whether the value has changed. 
-     * This will spike `true` once for each time the value ref was changed. 
-     * 
+     * This will spike `true` once for each time the value of `Signal` was changed.
+     * It will always start with `true` when the process is run or when the `Signal` is
+     * set for the first time. 
      */
     def changed: Process[Task, Boolean]
-
-    /** 
+    
+    /**
      * Returns the discrete version of this signal, updated only when `value`
-     * is changed.  Value may changed several times between reads, but it is
+     * is changed.  Value may change several times between reads, but it is
      * guaranteed this will always get latest known value after any change. If you want
-     * to be notified about every single change use `async.queue` for signalling. 
+     * to be notified about every single change use `async.queue` for signalling.
+     *
+     * It will emit the current value of the Signal after being run or when the signal 
+     * is set for the first time
      */
     def discrete: Process[Task, A]
 
-    /** 
+    /**
      * Returns the continuous version of this signal, always equal to the 
      * current `A` inside `value`.
      */
     def continuous: Process[Task, A]
 
-    /** 
-     * Returns the discrete version of `changed`. Will emit `Unit` 
+    /**
+     * Returns the discrete version of `changed`. Will emit `Unit`
      * when the `value` is changed.
      */
     def changes: Process[Task, Unit]
 
-    /** 
-     * Keep the value of this `Signal` the same, but notify any listeners.
+    /**
+     * Asynchronously get the current value of this `Signal`
      */
-    def refresh: Unit = value.modify(a => a)
+    def get : Task[A]  
+    
   }
+
+  
+  
+  object Signal {
+
+    sealed trait Msg[+A]
+
+    /**
+     * Sets the signal to given value 
+     */
+    case class Set[A](a:A) extends Msg[A]
+
+    /**
+     * Conditionally sets signal to given value. Acts similarly as `Signal.compareAndSet`
+     */
+    case class CompareAndSet[A](f:Option[A] => Option[A]) extends Msg[A]
+
+
+    /**
+     * Fails the current signal with supplied exception. Acts similarly as `Signal.fail`
+     */
+    case class Fail(err:Throwable) extends Msg[Nothing]
+
+    /**
+     * Special variant of Fail, that will close the signal. 
+     */
+    val Close = Fail(End)
+    
+  }
+
+
+  /**
+   * Represents topic, that asynchronously exchanges messages between one or more publisher(s) 
+   * and one or more subscriber(s). 
+   *
+   * Guarantees:
+   *    - Order of messages from publisher is guaranteed to be preserved to all subscribers
+   *    - Messages from publishers may interleave in non deterministic order before they are read by subscribers
+   *    - Once the `subscriber` is run it will receive all messages from all `publishers`
+   *
+   * Please not that topic is `active` even when there are no publishers or subscribers attached to it. However
+   * once the `close` or `fail` is called all the publishers and subscribers will terminate or fail.
+   *
+   * @tparam A
+   */
+  trait Topic[A,B] {
+    import message.topic._
+
+    private[stream] val actor : Actor[Msg[A,B]]
+
+    /**
+     * Gets publisher to this topic. There may be multiple publishers to this topic.
+     */
+    val publisher : Sink[Task,A] = repeatWrap(Task.now{ a:A => Task.async[Unit](reg => actor ! Publish(a,reg))})
+
+    /**
+     * Gets subscriber from this topic. Id can be used in subscribers to distinguish between 
+     * different subscribers, if necessary. Id may not be unique.
+     * @return
+     */
+    def subscriber(id:B) : Process[Task,A] = {
+      await(Task.async[SubscriberRef[A,B]](reg => actor ! Subscribe(id,reg)))(
+        sref =>
+          repeatWrap(Task.async[Seq[A]]{ reg => actor ! Get(sref,reg)})
+            .flatMap(l => emitAll(l))
+            .onComplete(wrap(Task.async[Unit](reg=> actor ! UnSubscribe(sref,reg))).drain)
+        , halt
+        , halt)
+    }
+
+    /**
+     * Gets signal than can be used to get list of current subscribers. 
+     * When this topic is `failed` or `finished` this signal is `failed` or `finished` as well.
+     * The signal is set once the very first subscriber subscribes (actually is `run`). This can 
+     * be used also to start some process that will feed some `A` to this topic and to subscribers, but only when 
+     * there is at least one subscriber available.
+     */
+    val subscribers : ReadOnlySignal[List[B]]
+
+
+    /**
+     * Will `finish` this topic. Once `finished` all publishers and subscribers are halted via `halt`.
+     * When this topic is `finished` or `failed` this is no-op
+     * @return
+     */
+    def close : Task[Unit] = fail(End)
+
+    /**
+     * Will `fail` this topic. Once `failed` all publishers and subscribers will terminate with cause `err`.
+     * When this topic is `finished` or `failed` this is no-op
+     * @param err
+     * @return
+     */
+    def fail(err:Throwable) : Task[Unit] = Task.async[Unit](reg => actor ! Fail(err,reg)).attempt.map(_=>())
+
+
+  }
+  
 }
+
+ 
