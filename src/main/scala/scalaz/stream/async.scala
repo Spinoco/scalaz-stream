@@ -329,8 +329,8 @@ object async extends async {
    * A signal whose value may be set asynchronously. Provides continuous 
    * and discrete streams for responding to changes to this value. 
    */
-  trait Signal[A] extends ReadOnlySignal[A] {
- 
+  trait Signal[A] extends ReadOnlySignal[A]  { self =>
+
     /** 
      * Asynchronously refreshes the value of the signal, 
      * keep the value of this `Signal` the same, but notify any listeners.
@@ -392,7 +392,7 @@ object async extends async {
     
   }
 
-  /**
+ /**
    * Signal that can be only `read` 
    */
   trait ReadOnlySignal[A] {
@@ -435,6 +435,38 @@ object async extends async {
     def get : Task[A]  
     
   }
+
+  
+  
+  object Signal {
+
+    sealed trait Msg[+A]
+
+    /**
+     * Sets the signal to given value 
+     */
+    case class Set[A](a:A) extends Msg[A]
+
+    /**
+     * Conditionally sets signal to given value. Acts similarly as `Signal.compareAndSet`
+     */
+    case class CompareAndSet[A](f:Option[A] => Option[A]) extends Msg[A]
+
+
+    /**
+     * Fails the current signal with supplied exception. Acts similarly as `Signal.fail`
+     */
+    case class Fail(err:Throwable) extends Msg[Nothing]
+
+    /**
+     * Special variant of Fail, that will close the signal. 
+     */
+    val Close = Fail(End)
+    
+  }
+  
+}
+
 
 
   /**
