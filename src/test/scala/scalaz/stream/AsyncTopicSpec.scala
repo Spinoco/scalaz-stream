@@ -9,12 +9,15 @@ import processes._
 import java.lang.Exception
 import scala.Predef._
 import scalaz.-\/
+import java.util.concurrent.{Executors, ExecutorService}
 
 object AsyncTopicSpec extends Properties("topic") {
 
   case object TestedEx extends Exception("expected in test") {
     override def fillInStackTrace = this
   }
+  
+  implicit val es: ExecutorService = Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors()*4 min(10))
 
 
   //tests basic publisher and subscriber functionality 
