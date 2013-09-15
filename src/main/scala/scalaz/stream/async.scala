@@ -6,11 +6,10 @@ import scalaz.concurrent._
 import java.util.concurrent.atomic._
 
 import scalaz.stream.Process._
-import scala.Some
-import scalaz.stream.async.Topic
+import scala.Some 
 
 trait async {
-  import async.{Queue,Ref,Signal}
+  import async.{Queue,Ref,Signal,Topic}
 
   /** 
    * Convert from an `Actor` accepting `message.queue.Msg[A]` messages 
@@ -331,6 +330,18 @@ object async extends async {
    */
   trait Signal[A] extends ReadOnlySignal[A]  { self =>
 
+    /**
+     * Returns sink that can be used to set this signal
+     */
+    def sink: Sink[Task,Signal.Msg[A]] = Process.repeatWrap[Task,Signal.Msg[A] => Task[Unit]] (Task.now{(msg:Signal.Msg[A]) =>
+      import Signal._
+      msg match {
+        case Set(a) =>  self.set(a)
+        case CompareAndSet(f) => self.compareAndSet(f).map(_=>())
+        case Fail(err) =>  self.fail(err)
+      }
+    })
+    
     /** 
      * Asynchronously refreshes the value of the signal, 
      * keep the value of this `Signal` the same, but notify any listeners.
@@ -464,9 +475,6 @@ object async extends async {
     val Close = Fail(End)
     
   }
-  
-}
-
 
 
   /**
@@ -477,7 +485,7 @@ object async extends async {
    *    - Order of messages from publisher is guaranteed to be preserved to all subscribers
    *    - Messages from publishers may interleave in non deterministic order before they are read by subscribers
    *    - Once the `subscriber` is run it will receive all messages from all `publishers`
-   *    
+   *
    * Please not that topic is `active` even when there are no publishers or subscribers attached to it. However
    * once the `close` or `fail` is called all the publishers and subscribers will terminate or fail.
    *
@@ -485,7 +493,7 @@ object async extends async {
    */
   trait Topic[A,B] {
     import message.topic._
-    
+
     private[stream] val actor : Actor[Msg[A,B]]
 
     /**
@@ -500,12 +508,12 @@ object async extends async {
      */
     def subscriber(id:B) : Process[Task,A] = {
       await(Task.async[SubscriberRef[A,B]](reg => actor ! Subscribe(id,reg)))(
-        sref => 
+        sref =>
           repeatWrap(Task.async[Seq[A]]{ reg => actor ! Get(sref,reg)})
-          .flatMap(l => emitAll(l)) 
-          .onComplete(wrap(Task.async[Unit](reg=> actor ! UnSubscribe(sref,reg))).drain)
+            .flatMap(l => emitAll(l))
+            .onComplete(wrap(Task.async[Unit](reg=> actor ! UnSubscribe(sref,reg))).drain)
         , halt
-        , halt)      
+        , halt)
     }
 
     /**
@@ -537,3 +545,5 @@ object async extends async {
   }
   
 }
+
+ 
