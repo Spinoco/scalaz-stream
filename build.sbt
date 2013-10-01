@@ -82,4 +82,3 @@ pomExtra := (
 
 net.virtualvoid.sbt.graph.Plugin.graphSettings
 
-// vim: expandtab:ts=2:sw=2
