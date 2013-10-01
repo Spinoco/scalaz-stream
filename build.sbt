@@ -22,17 +22,21 @@ scalacOptions ++= Seq(
 
 // https://github.com/sbt/sbt/issues/603
 conflictWarning ~= { cw =>
-  cw.copy(filter = (id: ModuleID) => true, group = (id: ModuleID) => id.organization + ":" + id.name, level = Level.Error)
+  cw.copy(level = Level.Error, filter = (id: ModuleID) => true, group = (id: ModuleID) => id.organization + ":" + id.name)
 }
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-core" % "7.1.0-SNAPSHOT",
-  "org.scalaz" %% "scalaz-concurrent" % "7.1.0-SNAPSHOT",
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.1.0-SNAPSHOT" % "test",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.4-S1-SNAPSHOT",
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4-S1-SNAPSHOT" % "test",
   "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
 )
 
-resolvers ++= Seq(Resolver.sonatypeRepo("releases"), Resolver.sonatypeRepo("snapshots"))
+resolvers ++= Seq(
+  Resolver.sonatypeRepo("releases"),
+  Resolver.sonatypeRepo("snapshots"),
+  MavenRepository("Spinoco releases", "https://maven.spinoco.com/nexus/content/repositories/releases/"),
+  MavenRepository("Spinoco snapshots", "https://maven.spinoco.com/nexus/content/repositories/snapshots/")
+)
 
 publishTo <<= (version).apply { v =>
   val nexus = "https://maven.spinoco.com/"
@@ -75,5 +79,7 @@ pomExtra := (
     </developer>
   </developers>
 )
+
+net.virtualvoid.sbt.graph.Plugin.graphSettings
 
 // vim: expandtab:ts=2:sw=2
