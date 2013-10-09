@@ -1,7 +1,8 @@
 package scalaz.stream
 
 import scalaz.\/ 
-import scalaz.concurrent._  
+import scalaz.concurrent._
+import scalaz.stream.Process._
 
 package object async {
   import mutable.{Queue,Ref,Signal,Topic}
@@ -103,10 +104,9 @@ package object async {
    * processes that can be used to publish and subscribe asynchronously. 
    * Please see `Topic` for more info.
    */
-  def topic[A](implicit S: Strategy = Strategy.DefaultStrategy): Topic[A] = {
-    new Topic[A]{
-      private[stream] val actor = scalaz.stream.actor.topic[A](S) 
-    }
+  def topic[A](implicit S: Strategy = Strategy.DefaultStrategy): Topic[A] = new Topic[A] { 
+    private[stream] lazy val actor = scalaz.stream.actor.topic[A](Topic.journal.none)(S)
   }
+  
 }
 
