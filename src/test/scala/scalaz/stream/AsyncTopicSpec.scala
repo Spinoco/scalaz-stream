@@ -181,9 +181,9 @@ object AsyncTopicSpec extends Properties("topic") {
     l: List[Int] => 
       (l.size > 0 && l.size < 10000) ==> {
         val (before,after) = l.splitAt(l.size/2)
-        val first = feed(before)(Topic.journal.last(10 millis))
+        val first = feed(before)(Topic.journal.last(20 millis))
         
-        Thread.sleep(20)
+        Thread.sleep(30)
         val second =  feed(after)(first)
         
         (first.flush == before) :| "first before eviction were collected" &&
