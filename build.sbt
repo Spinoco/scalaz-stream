@@ -23,8 +23,8 @@ scalacOptions ++= Seq(
 conflictManager := ConflictManager.strict
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-concurrent" % "7.0.4-SNAPSHOT" exclude("org.scala-lang","*"),
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4-SNAPSHOT" % "test",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.4" exclude("org.scala-lang","*"),
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4" % "test",
   "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
 )
 
