@@ -254,7 +254,7 @@ object ProcessSpec extends Properties("Process1") {
     val i1 = repeatEval(Task.now(false))
     val v = i1.wye(p1)(wye.interrupt).runLog.run.toList
     v == List(1,2,3,4,6)
-  } 
+  }
 
   import scala.concurrent.duration._
   val smallDelay = Gen.choose(10, 300) map {_.millis}
