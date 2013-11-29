@@ -10,11 +10,14 @@ import scalaz.std.string._
 import org.scalacheck._
 import Prop._
 import Arbitrary.arbitrary
+import scalaz.concurrent.Strategy
 
 object ProcessSpec extends Properties("Process1") {
 
   import Process._
   import process1._
+
+  implicit val S = Strategy.DefaultStrategy
 
   // Subtyping of various Process types:
   // * Process1 is a Tee that only read from the left (Process1[I,O] <: Tee[I,Any,O])
@@ -246,15 +249,12 @@ object ProcessSpec extends Properties("Process1") {
     }
   }
 
-  /*
-  This fails
   property("interrupt") = secure {
     val p1 = Process(1,2,3,4,6).toSource
     val i1 = repeatEval(Task.now(false))
     val v = i1.wye(p1)(wye.interrupt).runLog.run.toList
     v == List(1,2,3,4,6)
-  }
-  */
+  } 
 
   import scala.concurrent.duration._
   val smallDelay = Gen.choose(10, 300) map {_.millis}
