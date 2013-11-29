@@ -28,6 +28,6 @@ trait TopicOps[A] extends Ops[Topic[A]] {
    *                 journal by invoking `journal.flush`
    */
   def journal(journal:Process1[A,A])(implicit S: Strategy = Strategy.DefaultStrategy) : Topic[A] = new Topic[A] {
-    private[stream] lazy val actor = scalaz.stream.actor.topic[A](journal)(S)
+    private[stream] lazy val actor = scalaz.stream.actor.actors.topic[A](journal)(S)
   }
 }

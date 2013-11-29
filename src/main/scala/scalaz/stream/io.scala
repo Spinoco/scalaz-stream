@@ -50,6 +50,10 @@ trait io {
     }
   }
 
+  /** Promote an effectful function to a `Channel`. */
+  def channel[A,B](f: A => Task[B]): Channel[Task, A, B] =
+    Process.constant(f)
+
   /**
    * Create a `Channel[Task,Int,Bytes]` from an `InputStream` by
    * repeatedly requesting the given number of bytes. The last chunk
@@ -83,6 +87,10 @@ trait io {
   def fileChunkR(f: String, bufferSize: Int = 4096): Channel[Task, Int, Array[Byte]] =
     chunkR(new BufferedInputStream(new FileInputStream(f), bufferSize))
 
+  /** A `Sink` which, as a side effect, adds elements to the given `Buffer`. */
+  def fillBuffer[A](buf: collection.mutable.Buffer[A]): Sink[Task,A] =
+    channel((a: A) => Task.delay { buf += a })
+
   /**
    * Create a `Process[Task,String]` from the lines of a file, using
    * the `resource` combinator to ensure the file is closed
@@ -96,10 +104,22 @@ trait io {
     }
 
   /**
+   * Create a `Process[Task,String]` from the lines of the `InputStream`,
+   * using the `resource` combinator to ensure the `InputStream` is closed
+   * when processing the stream of lines is finished.
+   */
+  def linesR(in: InputStream): Process[Task,String] =
+    resource(Task.delay(scala.io.Source.fromInputStream(in)))(
+             src => Task.delay(src.close)) { src =>
+      lazy val lines = src.getLines // A stateful iterator
+      Task.delay { if (lines.hasNext) lines.next else throw End }
+    }
+
+  /**
    * Generic combinator for producing a `Process[Task,O]` from some
    * effectful `O` source. The source is tied to some resource,
    * `R` (like a file handle) that we want to ensure is released.
-   * See `lines` below for an example use.
+   * See `linesR` for an example use.
    */
   def resource[R,O](acquire: Task[R])(
                     release: R => Task[Unit])(
@@ -116,11 +136,25 @@ trait io {
   }
 
   /**
+   * The standard output stream, as a `Sink`. This `Sink` does not
+   * emit newlines after each element. For that, use `stdOutLines`.
+   */
+  def stdOut: Sink[Task,String] =
+    channel((s: String) => Task.delay { print(s) })
+
+  /**
+   * The standard output stream, as a `Sink`. This `Sink` emits
+   * newlines after each element. If this is not desired, use `stdOut`.
+   */
+  def stdOutLines: Sink[Task,String] =
+    channel((s: String) => Task.delay { println(s) })
+
+  /**
    * Create a `Channel[Task,Array[Byte],Array[Bytes]]` from an `InputStream` by
    * repeatedly filling the input buffer. The last chunk may be less
    * than the requested size.
    *
-   * It is safe to recyle the same buffer for consecutive reads
+   * It is safe to recycle the same buffer for consecutive reads
    * as long as whatever consumes this `Process` never stores the `Array[Byte]`
    * returned or pipes it to a combinator (like `buffer`) that does.
    * Use `chunkR` for a safe version of this combinator - this takes

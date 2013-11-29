@@ -49,6 +49,10 @@ trait process1 {
     go(n, Vector())
   }
 
+  /** Collects up all output of this `Process1` into a single `Emit`. */
+  def chunkAll[I]: Process1[I,Vector[I]] =
+    chunkBy[I](_ => false)
+
   /**
    * Like `chunk`, but emits a chunk whenever the predicate switches from
    * true to false.
@@ -65,32 +69,181 @@ trait process1 {
   }
 
   /**
-   * Like `collect` on scala collection. 
-   * Builds a new process by applying a partial function 
+   * Like `chunkBy`, but the predicate depends on the current and previous elements.
+   */
+  def chunkBy2[I](f: (I, I) => Boolean): Process1[I, Vector[I]] = {
+    def go(acc: Vector[I], last: I): Process1[I,Vector[I]] =
+      await1[I].flatMap { i =>
+        if (f(last, i)) go(acc :+ i, i)
+        else emit(acc) fby go(Vector(i), i)
+      } orElse emit(acc)
+    await1[I].flatMap(i => go(Vector(i), i))
+  }
+
+  /**
+   * Like `collect` on scala collection.
+   * Builds a new process by applying a partial function
    * to all elements of this process on which the function is defined.
-   * 
-   * Elements, for which the partial function is not defined are 
+   *
+   * Elements, for which the partial function is not defined are
    * filtered out from new process
-   * 
+   *
    */
   def collect[I,I2](pf: PartialFunction[I,I2]): Process1[I,I2] =
     id[I].flatMap(pf andThen(emit) orElse { case _ => halt })
 
-  /** 
-   * Emits a single `true` value if all input matches the predicate.
-   * Halts with `false` as soon as a non-matching element is received. 
+  /** Skips the first `n` elements of the input, then passes through the rest. */
+  def drop[I](n: Int): Process1[I,I] =
+    if (n <= 0) id[I]
+    else skip fby drop(n-1)
+
+  /**
+   * Skips elements of the input while the predicate is true,
+   * then passes through the remaining inputs.
    */
-  def forall[I](f: I => Boolean): Process1[I,Boolean] = 
+  def dropWhile[I](f: I => Boolean): Process1[I,I] =
+    await1[I] flatMap (i => if (f(i)) dropWhile(f) else emit(i) fby id)
+
+  /** Feed a single input to a `Process1`. */
+  def feed1[I,O](i: I)(p: Process1[I,O]): Process1[I,O] =
+    feed(Seq(i))(p)
+
+  /** Feed a sequence of inputs to a `Process1`. */
+  def feed[I,O](i: Seq[I])(p: Process1[I,O]): Process1[I,O] = {
+    @annotation.tailrec
+    def go(in: Seq[I], out: Vector[Seq[O]], cur: Process1[I,O]): Process1[I,O] =
+      if (in.nonEmpty) cur match {
+        case h@Halt(_) => emitSeq(out.flatten, h)
+        case Emit(h, t) => go(in, out :+ h, t)
+        case Await1(recv, fb, c) =>
+          val next =
+            try recv(in.head)
+            catch {
+              case End => fb
+              case e: Throwable => c.causedBy(e)
+            }
+          go(in.tail, out, next)
+      }
+      else emitSeq(out.flatten, cur)
+    go(i, Vector(), p)
+  }
+
+  /** Skips any elements of the input not matching the predicate. */
+  def filter[I](f: I => Boolean): Process1[I,I] =
+    await1[I] flatMap (i => if (f(i)) emit(i) else halt) repeat
+
+  /**
+   * Skips any elements not satisfying predicate and when found, will emit that
+   * element and terminate
+   */
+  def find[I](f: I => Boolean): Process1[I,I] =
+    await1[I] flatMap (i => if(f(i)) emit(i) else find(f))
+
+  /**
+    * Halts with `true` as soon as a matching element is received.
+    * Emits a single `false` if no input matches the predicate.
+    */
+  def exists[I](f: I => Boolean): Process1[I,Boolean] =
+    forall[I](! f(_)).map(! _)
+
+  /**
+   * Emits a single `true` value if all input matches the predicate.
+   * Halts with `false` as soon as a non-matching element is received.
+   */
+  def forall[I](f: I => Boolean): Process1[I,Boolean] =
     await1[I].flatMap(i => if (f(i)) forall(f) else emit(false)) orElse (emit(true))
 
   /**
-   * Emit the given values, then echo the rest of the input. This is
-   * useful for feeding values incrementally to some other `Process1`:
-   * `init(1,2,3) |> p` returns a version of `p` which has been fed
-   * `1, 2, 3`.
+   * `Process1` form of `List.fold`.
+   *  Folds the elements of this Process using the specified associative binary operator.
+   *
+   *  Unlike List.fold the order is always from the `left` side, i.e. it will always
+   *  honor order of `A`.
+   *
+   *  If Process of `A` is empty, it will just emit `z` and terminate
+   *
+   *  `Process(1,2,3,4) |> fold(0)(_ + _) == Process(10)`
+   */
+  def fold[A,B](z: B)(f: (B,A) => B): Process1[A,B] =
+    scan(z)(f).last
+
+  /**
+   * `Process1` form of `List.reduce`.
+   *
+   *  Reduces the elements of this Process using the specified associative binary operator.
+   *
+   *  `Process(1,2,3,4) |> reduce(_ + _) == Process(10)`
+   *  `Process(1) |> reduce(_ + _) == Process(1)`
+   *  `Process() |> reduce(_ + _) == Process()`
+   *
+   */
+  def fold1[A](f: (A,A) => A): Process1[A,A] =
+    reduce(f)
+
+  /**
+   * Like `fold1` only uses `f` to map `A` to `B` and uses Monoid `M` or associative operation
+   */
+  def fold1Map[A,B](f: A => B)(implicit M: Monoid[B]): Process1[A,B] =
+    reduceMap(f)(M)
+
+  /** alias for `reduceMonoid` */
+  def fold1Monoid[A](implicit M: Semigroup[A]): Process1[A,A] =
+    reduce(M.append(_,_))
+
+  /**
+   * Like `fold` only uses `f` to map `A` to `B` and uses Monoid `M` or associative operation
+   */
+  def foldMap[A,B](f: A => B)(implicit M: Monoid[B]): Process1[A,B] =
+   id[A].map(f).foldMonoid(M)
+
+  /**
+   * Like `fold` but uses Monoid for folding operation
+   */
+  def foldMonoid[A](implicit M: Monoid[A]): Process1[A,A] =
+    fold(M.zero)(M.append(_,_))
+
+  /** alias for `reduceSemigroup` */
+  def foldSemigroup[A](implicit M: Semigroup[A]): Process1[A,A] =
+    reduce(M.append(_,_))
+
+  /** Repeatedly echo the input; satisfies `x |> id == x` and `id |> x == x`. */
+  def id[I]: Process1[I,I] =
+    await1[I].repeat
+
+  /**
+   * Emit the given values, then echo the rest of the input.
    */
   def init[I](head: I*): Process1[I,I] =
     emitSeq(head) ++ id
+
+  /**
+   * Add `separator` between elements of the input. For example,
+   * `Process(1,2,3,4) |> intersperse(0) == Process(1,0,2,0,3,0,4)`.
+   */
+  def intersperse[A](separator: A): Process1[A,A] =
+    await1[A].flatMap(head => emit(head) ++ id[A].flatMap(a => Process(separator, a)))
+
+  /** Skip all but the last element of the input. */
+  def last[I]: Process1[I,I] = {
+    def go(prev: I): Process1[I,I] =
+      awaitOption[I].flatMap {
+        case None => emitView(prev)
+        case Some(prev2) => go(prev2)
+      }
+    await1[I].flatMap(go)
+  }
+
+  /**
+   * Skip all but the last element of the input.
+   * This `Process` will always emit exactly one value;
+   * If the input is empty, `i` is emitted.
+   */
+  def lastOr[I](i: => I): Process1[I,I] =
+    last |> await1[I].orElse(emit(i))
+
+  /** Transform the input using the given function, `f`. */
+  def lift[I,O](f: I => O): Process1[I,O] =
+    id[I] map f
 
   /**
    * Transform `p` to operate on the left hand side of an `\/`, passing
@@ -122,41 +275,6 @@ trait process1 {
   def multiplex[I,I2,O](chan1: Process1[I,O], chan2: Process1[I2,O]): Process1[I \/ I2, O] =
     (liftL(chan1) pipe liftR(chan2)).map(_.fold(identity, identity))
 
-  /** Feed a single input to a `Process1`. */
-  def feed1[I,O](i: I)(p: Process1[I,O]): Process1[I,O] =
-    p match {
-      case h@Halt(_) => h
-      case Emit(h, t) => emitSeq(h, feed1(i)(t))
-      case Await1(recv,fb,c) =>
-        try recv(i)
-        catch {
-          case End => fb
-          case e: Throwable => c.causedBy(e)
-        }
-    }
-
-  /** Feed a sequence of inputs to a `Process1`. */
-  def feed[I,O](i: Seq[I])(p: Process1[I,O]): Process1[I,O] =
-    p match {
-      case Halt(_) => p
-      case Emit(h, t) => Emit(h, feed(i)(t))
-      case _ =>
-        var buf = i
-        var cur = p
-        var ok = true
-        while (!buf.isEmpty && ok) {
-          val h = buf.head
-          buf = buf.tail
-          cur = feed1(h)(cur)
-          cur match {
-            case Halt(_)|Emit(_,_) => ok = false
-            case _ => ()
-          }
-        }
-        if (buf.isEmpty) cur
-        else feed(buf)(cur)
-    }
-
   /**
    * Record evaluation of `p`, emitting the current state along with the ouput of each step.
    */
@@ -168,91 +286,6 @@ trait process1 {
   }
 
   /**
-   * Break the input into chunks where the delimiter matches the predicate.
-   * The delimiter does not appear in the output. Two adjacent delimiters in the
-   * input result in an empty chunk in the output.
-   */
-  def split[I](f: I => Boolean): Process1[I, Vector[I]] = {
-    def go(acc: Vector[I]): Process1[I, Vector[I]] =
-      await1[I].flatMap { i =>
-        if (f(i)) emit(acc) fby go(Vector())
-        else go(acc :+ i)
-      } orElse (emit(acc))
-    go(Vector())
-  }
-
-  /**
-   * Break the input into chunks where the input is equal to the given delimiter.
-   * The delimiter does not appear in the output. Two adjacent delimiters in the
-   * input result in an empty chunk in the output.
-   */
-  def splitOn[I:Equal](i: I): Process1[I, Vector[I]] =
-    split(_ === i)
-
-  /** Collects up all output of this `Process1` into a single `Emit`. */
-  def chunkAll[I]: Process1[I,Vector[I]] =
-    chunkBy[I](_ => false)
-
-  /** Outputs a sliding window of size `n` onto the input. */
-  def window[I](n: Int): Process1[I,Vector[I]] = {
-    def go(acc: Vector[I], c: Int): Process1[I,Vector[I]] =
-      if (c > 0)
-        await1[I].flatMap { i => go(acc :+ i, c - 1) } orElse emit(acc)
-      else
-        emit(acc) fby go(acc.tail, 1)
-    go(Vector(), n)
-  }
-
-  /** Skips the first `n` elements of the input, then passes through the rest. */
-  def drop[I](n: Int): Process1[I,I] =
-    if (n <= 0) id[I]
-    else skip fby drop(n-1)
-
-  /**
-   * Skips elements of the input while the predicate is true,
-   * then passes through the remaining inputs.
-   */
-  def dropWhile[I](f: I => Boolean): Process1[I,I] =
-    await1[I] flatMap (i => if (f(i)) dropWhile(f) else emit(i) fby id)
-
-  /** Skips any elements of the input not matching the predicate. */
-  def filter[I](f: I => Boolean): Process1[I,I] =
-    await1[I] flatMap (i => if (f(i)) emit(i) else halt) repeat
-
-  /** 
-   * Skips any elements not satisfying predicate and when found, will emit that 
-   * element and terminate
-   */
-  def find[I](f: I => Boolean): Process1[I,I] =  
-    await1[I] flatMap (i => if(f(i)) emit(i) else find(f))
-  
-  /**
-   * `Process1` form of `List.fold`. 
-   *  Folds the elements of this Process using the specified associative binary operator.
-   * 
-   *  Unlike List.fold the order is always from the `left` side, i.e. it will always 
-   *  honor order of `A`.
-   *  
-   *  If Process of `A` is empty, it will just emit `z` and terminate
-   *  
-   *  `Process(1,2,3,4) |> fold(0)(_ + _) == Process(10)`
-   */
-  def fold[A,B](z: B)(f: (B,A) => B): Process1[A,B] = 
-    scan(z)(f).last
-
-  /**
-   * Like `fold` but uses Monoid for folding operation 
-   */
-  def foldMonoid[A](implicit M: Monoid[A]): Process1[A,A] =
-    fold(M.zero)(M.append(_,_))
-  
-  /**
-   * Like `fold` only uses `f` to map `A` to `B` and uses Monoid `M` or associative operation
-   */
-  def foldMap[A,B](f: A => B)(implicit M: Monoid[B]): Process1[A,B] = 
-   id[A].map(f).foldMonoid(M)
-
-  /**
    * `Process1` form of `List.reduce`.
    *
    *  Reduces the elements of this Process using the specified associative binary operator.
@@ -261,37 +294,10 @@ trait process1 {
    *  `Process(1) |> reduce(_ + _) == Process(1)`
    *  `Process() |> reduce(_ + _) == Process()`
    *
-   */
-  def fold1[A](f: (A,A) => A): Process1[A,A] = 
-    reduce(f)
-
-  /** alias for `reduceMonoid` */
-  def fold1Monoid[A](implicit M: Semigroup[A]): Process1[A,A] =
-    reduce(M.append(_,_))
-
-  /** alias for `reduceSemigroup` */
-  def foldSemigroup[A](implicit M: Semigroup[A]): Process1[A,A] =
-    reduce(M.append(_,_))
-
-  /**
-   * Like `fold1` only uses `f` to map `A` to `B` and uses Monoid `M` or associative operation
-   */
-  def fold1Map[A,B](f: A => B)(implicit M: Monoid[B]): Process1[A,B] =
-    reduceMap(f)(M)
-
-  /**
-   * `Process1` form of `List.reduce`.
-   * 
-   *  Reduces the elements of this Process using the specified associative binary operator.
-   * 
-   *  `Process(1,2,3,4) |> reduce(_ + _) == Process(10)`
-   *  `Process(1) |> reduce(_ + _) == Process(1)`
-   *  `Process() |> reduce(_ + _) == Process()`
-   *  
    *  Unlike `List.reduce` will not fail when Process is empty.
-   *   
+   *
    */
-  def reduce[A](f: (A,A) => A): Process1[A,A] = 
+  def reduce[A](f: (A,A) => A): Process1[A,A] =
     scan1(f).last
 
   /**
@@ -312,33 +318,15 @@ trait process1 {
   def reduceMap[A,B](f: A => B)(implicit M: Monoid[B]): Process1[A,B] =
     id[A].map(f).reduceMonoid(M)
 
-  /** Repeatedly echo the input; satisfies `x |> id == x` and `id |> x == x`. */
-  def id[I]: Process1[I,I] =
-    await1[I].repeat
+  /** Throws any input exceptions and passes along successful results. */
+  def rethrow[A]: Process1[Throwable \/ A, A] =
+    await1[Throwable \/ A].flatMap {
+      case -\/(err) => throw err
+      case \/-(a) => emit(a)
+    } repeat
 
   /**
-   * Add `separator` between elements of the input. For example,
-   * `Process(1,2,3,4) |> intersperse(0) == Process(1,0,2,0,3,0,4)`.
-   */
-  def intersperse[A](separator: A): Process1[A,A] =
-    await1[A].flatMap(head => emit(head) ++ id[A].flatMap(a => Process(separator, a)))
-
-  /** Skip all but the last element of the input. */
-  def last[I]: Process1[I,I] = {
-    def go(prev: I): Process1[I,I] =
-      awaitOption[I].flatMap {
-        case None => emit(prev)
-        case Some(prev2) => go(prev2)
-      }
-    await1[I].flatMap(go)
-  }
-
-  /** Transform the input using the given function, `f`. */
-  def lift[I,O](f: I => O): Process1[I,O] =
-    id[I] map f
-
-  /** 
-   * Similar to List.scan. 
+   * Similar to List.scan.
    * Produces a process of `B` containing cumulative results of applying the operator to Process of `A`.
    * It will always emit `z`, even when the Process of `A` is empty
    */
@@ -346,7 +334,7 @@ trait process1 {
     emit(z) fby await1[A].flatMap (a => scan(f(z,a))(f))
 
   /**
-   * Like `scan` but uses Monoid for associative operation 
+   * Like `scan` but uses Monoid for associative operation
    */
   def scanMonoid[A](implicit M: Monoid[A]): Process1[A,A] =
     scan(M.zero)(M.append(_,_))
@@ -363,7 +351,7 @@ trait process1 {
    *  `Process(1,2,3,4) |> scan1(_ + _) == Process(1,3,6,10)`
    *  `Process(1) |> scan1(_ + _) == Process(1)`
    *  `Process() |> scan1(_ + _) == Process()`
-   * 
+   *
    */
   def scan1[A](f: (A,A) => A): Process1[A,A] = {
     def go(a: A): Process1[A,A] = emit(a) fby await1[A].flatMap(a2 => go(f(a,a2)))
@@ -371,13 +359,13 @@ trait process1 {
   }
 
   /**
-   * Like `scan1` but uses Monoid for associative operation 
+   * Like `scan1` but uses Monoid for associative operation
    */
   def scan1Monoid[A](implicit M: Monoid[A]): Process1[A,A] =
     scan1(M.append(_,_))
 
   /**
-   * Like `scan1` but uses Semigroup for associative operation 
+   * Like `scan1` but uses Semigroup for associative operation
    */
   def scanSemigroup[A](implicit M: Semigroup[A]): Process1[A,A] =
     scan1(M.append(_,_))
@@ -387,10 +375,46 @@ trait process1 {
    */
   def scan1Map[A,B](f:A => B)(implicit M: Monoid[B]): Process1[A,B] =
     id[A].map(f).scan1Monoid(M)
-  
-  /** Wraps all inputs in `Some`, then outputs a single `None` before halting. */
-  def terminated[A]: Process1[A,Option[A]] =
-    lift[A,Option[A]](Some(_)) ++ emit(None)
+
+  /** Reads a single element of the input, emits nothing, then halts. */
+  def skip: Process1[Any,Nothing] = await1[Any].flatMap(_ => halt)
+
+  /**
+   * Break the input into chunks where the delimiter matches the predicate.
+   * The delimiter does not appear in the output. Two adjacent delimiters in the
+   * input result in an empty chunk in the output.
+   */
+  def split[I](f: I => Boolean): Process1[I, Vector[I]] = {
+    def go(acc: Vector[I]): Process1[I, Vector[I]] =
+      await1[I].flatMap { i =>
+        if (f(i)) emit(acc) fby go(Vector())
+        else go(acc :+ i)
+      } orElse (emit(acc))
+    go(Vector())
+  }
+
+  /** Remove any `None` inputs. */
+  def stripNone[A]: Process1[Option[A],A] =
+    await1[Option[A]].flatMap {
+      case None => stripNone
+      case Some(a) => emit(a) ++ stripNone
+    }
+
+  /**
+   * Break the input into chunks where the input is equal to the given delimiter.
+   * The delimiter does not appear in the output. Two adjacent delimiters in the
+   * input result in an empty chunk in the output.
+   */
+  def splitOn[I:Equal](i: I): Process1[I, Vector[I]] =
+    split(_ === i)
+
+  /**
+   * Emit a running sum of the values seen so far. The first value emitted will be the
+   * first number seen (not `0`). The length of the output `Process` always matches the
+   * length of the input `Process`.
+   */
+  def sum[N](implicit N: Numeric[N]): Process1[N,N] =
+    reduce(N.plus)
 
   /** Passes through `n` elements of the input, then halts. */
   def take[I](n: Int): Process1[I,I] =
@@ -401,36 +425,30 @@ trait process1 {
   def takeWhile[I](f: I => Boolean): Process1[I,I] =
     await1[I] flatMap (i => if (f(i)) emit(i) fby takeWhile(f) else halt)
 
-  /** Throws any input exceptions and passes along successful results. */
-  def rethrow[A]: Process1[Throwable \/ A, A] =
-    await1[Throwable \/ A].flatMap {
-      case -\/(err) => throw err
-      case \/-(a) => emit(a)
-    } repeat
+  /** Like `takeWhile`, but emits the first value which tests false. */
+  def takeThrough[I](f: I => Boolean): Process1[I,I] =
+    await1[I] flatMap (i => if (f(i)) emit(i) fby takeThrough(f) else emit(i))
 
-  /** Reads a single element of the input, emits nothing, then halts. */
-  def skip: Process1[Any,Nothing] = await1[Any].flatMap(_ => halt)
-
-  /** Remove any `None` inputs. */
-  def stripNone[A]: Process1[Option[A],A] =
-    await1[Option[A]].flatMap {
-      case None => stripNone
-      case Some(a) => emit(a) ++ stripNone
-    }
-
-  /**
-   * Emit a running sum of the values seen so far. The first value emitted will be the
-   * first number seen (not `0`). The length of the output `Process` always matches the
-   * length of the input `Process`.
-   */
-  def sum[N](implicit N: Numeric[N]): Process1[N,N] =
-    reduce(N.plus)
+  /** Wraps all inputs in `Some`, then outputs a single `None` before halting. */
+  def terminated[A]: Process1[A,Option[A]] =
+    lift[A,Option[A]](Some(_)) ++ emit(None)
 
   private val utf8Charset = Charset.forName("UTF-8")
 
   /** Convert `String` inputs to UTF-8 encoded byte arrays. */
   val utf8Encode: Process1[String,Array[Byte]] =
     lift(_.getBytes(utf8Charset))
+
+  /** Outputs a sliding window of size `n` onto the input. */
+  def window[I](n: Int): Process1[I,Vector[I]] = {
+    def go(acc: Vector[I], c: Int): Process1[I,Vector[I]] =
+      if (c > 0)
+        await1[I].flatMap { i => go(acc :+ i, c - 1) } orElse emit(acc)
+      else
+        emit(acc) fby go(acc.tail, 1)
+    go(Vector(), n)
+  }
+
 }
 
 object process1 extends process1

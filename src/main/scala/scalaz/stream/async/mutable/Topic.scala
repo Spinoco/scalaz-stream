@@ -1,10 +1,12 @@
 package scalaz.stream.async.mutable
 
-import scalaz.stream.message
+import scalaz.stream.actor.message
 import scalaz.concurrent.{Strategy, Task, Actor}
 import scalaz.stream.Process
+import scalaz.concurrent.{Task, Actor}
 import scalaz.stream.Process._
 import scalaz.stream.processes._
+import scalaz.stream.actor.message
 import scala.concurrent.duration.{FiniteDuration, Deadline, Duration}
 import scalaz.syntax.Ops
 

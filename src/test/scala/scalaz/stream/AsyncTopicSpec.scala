@@ -1,5 +1,6 @@
 package scalaz.stream
 
+import collection.mutable
 import org.scalacheck.{Prop, Properties}
 import org.scalacheck.Prop._
 import scalaz.{\/, -\/}
