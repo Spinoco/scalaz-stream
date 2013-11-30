@@ -23,8 +23,8 @@ scalacOptions ++= Seq(
 conflictManager := ConflictManager.strict
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-concurrent" % "7.0.4" exclude("org.scala-lang","*"),
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4" % "test",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.4" ,
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4" % "test" ,
   "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
 )
 
@@ -52,30 +52,9 @@ credentials += {
   }
 }
 
-pomIncludeRepository := Function.const(false)
+publishMavenStyle := true
 
-pomExtra := (
-  <url>http://typelevel.org/scalaz</url>
-  <licenses>
-    <license>
-      <name>MIT</name>
-      <url>http://www.opensource.org/licenses/mit-license.php</url>
-      <distribution>repo</distribution>
-    </license>
-  </licenses>
-  <scm>
-    <url>https://github.com/scalaz/scalaz-stream</url>
-    <connection>scm:git:git://github.com/scalaz/scalaz-stream.git</connection>
-    <developerConnection>scm:git:git@github.com:scalaz/scalaz-stream.git</developerConnection>
-  </scm>
-  <developers>
-    <developer>
-      <id>pchiusano</id>
-      <name>Paul Chiusano</name>
-      <url>https://github.com/pchiusano</url>
-    </developer>
-  </developers>
-)
+licenses += ("MIT", url("http://opensource.org/licenses/MIT"))
 
 net.virtualvoid.sbt.graph.Plugin.graphSettings
 
