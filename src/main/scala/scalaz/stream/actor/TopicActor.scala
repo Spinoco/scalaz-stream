@@ -4,6 +4,9 @@ import scalaz.concurrent.{Actor, Strategy}
 import scalaz.\/
 import scalaz.\/._
 import scala.collection.immutable.Queue
+import scalaz.stream._
+import scalaz.stream.Process._
+import scalaz.stream.Process1
 
 
 trait TopicActor {
@@ -24,10 +27,12 @@ trait TopicActor {
    * message.topic.UnSubscribe  - Un-subscribes subscriber
    * message.topic.Get          - Registers callback or gets messages in subscriber`s queue
    *
-   * Signal is notified always when the count of subscribers changes, and is set with very first subscriber
+   *
+   * Supplied journal is fed every published message to this actor. It is then consulted to fed the journaled messages
+   * to subscribers for eventual reconciliation.
    *
    */
-  def topic[A](implicit S:Strategy) :(Actor[message.topic.Msg[A]]) = {
+  def topic[A](journal:Process1[A,A])(implicit S:Strategy) :(Actor[message.topic.Msg[A]]) = {
     import message.topic._
 
     var subs = List[SubscriberRefInstance[A]]()
@@ -38,6 +43,8 @@ trait TopicActor {
     //left when this topic actor terminates or finishes
     var terminated : Throwable \/ Unit = open
 
+    var history : Process1[A,A] = journal
+
     @inline def ready = terminated.isRight
 
 
@@ -45,6 +52,7 @@ trait TopicActor {
 
       //Publishes message in the topic
       case Publish(a,cb) if ready =>
+        history = history.feed1(a)
         subs.foreach(_.publish(a))
         S(cb(open))
 
@@ -55,6 +63,7 @@ trait TopicActor {
 
       //Stops or fails this topic
       case Fail(err, cb) if ready =>
+        history = journal //journal cleanup
         subs.foreach(_.fail(err))
         subs = Nil
         terminated = left(err)
@@ -63,10 +72,14 @@ trait TopicActor {
 
       // Subscribes subscriber
       // When subscriber terminates it MUST send un-subscribe to release all it's resources
-      case Subscribe(cb) if ready =>
-        val subRef = new SubscriberRefInstance[A](left(Queue()))(S)
+      case Subscribe(cb, reconcile, buffer) if ready =>
+        val subRef = new SubscriberRefInstance[A](left(buffer),buffer)(S)
+        val inJournal = history.flush
         subs = subs :+ subRef
-        S(cb(right(subRef)))
+        S {
+          val reconciled = (emitAll(inJournal) |> reconcile).flush
+          cb(right((reconciled,subRef)))
+        }
 
       // UnSubscribes the subscriber.
       // This will actually un-subscribe event when this topic terminates
@@ -86,7 +99,7 @@ trait TopicActor {
 
       case Fail(_,cb) =>  S(cb(terminated))
 
-      case Subscribe(cb) => S(cb(terminated.bimap(t=>t,r=>sys.error("impossible"))))
+      case Subscribe(cb,_,_) => S(cb(terminated.bimap(t=>t,r=>sys.error("impossible"))))
 
 
     }

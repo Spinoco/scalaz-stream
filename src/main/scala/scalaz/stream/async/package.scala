@@ -2,6 +2,7 @@ package scalaz.stream
 
 import scalaz.{stream, \/}
 import scalaz.concurrent._
+import scalaz.stream.Process._
 import scalaz.stream.actor.message
 import scalaz.stream.actor.actors
 
@@ -105,10 +106,9 @@ package object async {
    * processes that can be used to publish and subscribe asynchronously. 
    * Please see `Topic` for more info.
    */
-  def topic[A](implicit S: Strategy = Strategy.DefaultStrategy): Topic[A] = {
-    new Topic[A]{
-      private[stream] val actor = actors.topic[A](S)
-    }
+  def topic[A](implicit S: Strategy = Strategy.DefaultStrategy): Topic[A] = new Topic[A] { 
+    private[stream] lazy val actor = scalaz.stream.actor.actors.topic[A](Topic.journal.none)(S)
   }
+  
 }
 

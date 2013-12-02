@@ -1,10 +1,16 @@
-organization := "org.scalaz.stream"
+organization := "spinoco"
 
 name := "scalaz-stream"
 
-version := "0.3-SNAPSHOT"
+version := (Option(System.getenv("BUILD_NUMBER")) orElse (Option(System.getProperty("BUILD_NUMBER")))).map(buildNo => {
+                             "0.1.0." +  buildNo + "-SNAPSHOT"
+                           }).getOrElse({
+                             val df = new java.text.SimpleDateFormat("yyMMddHHmmss")
+                             "0.1.0.T" + df.format(new java.util.Date()) + "-SNAPSHOT"
+                           })
+                         
 
-scalaVersion := "2.10.2"
+scalaVersion := "2.10.1"
 
 scalacOptions ++= Seq(
   "-feature",
@@ -14,20 +20,62 @@ scalacOptions ++= Seq(
   "-language:postfixOps"
 )
 
-resolvers ++= Seq(Resolver.sonatypeRepo("releases"), Resolver.sonatypeRepo("snapshots"))
+conflictManager := ConflictManager.strict
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-core" % "7.0.4",
-  "org.scalaz" %% "scalaz-concurrent" % "7.0.4",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.4" exclude("org.scala-lang","*"),
   "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4" % "test",
   "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
 )
 
-seq(bintraySettings:_*)
+resolvers ++= Seq(
+  Resolver.sonatypeRepo("releases"),
+  Resolver.sonatypeRepo("snapshots"),
+  MavenRepository("Spinoco releases", "https://maven.spinoco.com/nexus/content/repositories/releases/"),
+  MavenRepository("Spinoco snapshots", "https://maven.spinoco.com/nexus/content/repositories/snapshots/")
+)
 
-publishMavenStyle := true
+publishTo <<= (version).apply { v =>
+  val nexus = "https://maven.spinoco.com/"
+  if (v.trim.endsWith("SNAPSHOT"))
+    Some("Snapshots" at nexus + "nexus/content/repositories/snapshots")
+  else
+    Some("Releases" at nexus + "nexus/content/repositories/releases")
+}
 
-licenses += ("MIT", url("http://opensource.org/licenses/MIT"))
+credentials += {
+  Seq("build.publish.user", "build.publish.password").map(k => Option(System.getProperty(k))) match {
+    case Seq(Some(user), Some(pass)) =>
+      Credentials("Sonatype Nexus Repository Manager", "oss.sonatype.org", user, pass)
+    case _ =>
+      Credentials(Path.userHome / ".ivy2" / ".credentials")
+  }
+}
 
-bintray.Keys.packageLabels in bintray.Keys.bintray := 
-  Seq("stream processing", "functional I/O", "iteratees", "functional programming", "scala")
+pomIncludeRepository := Function.const(false)
+
+pomExtra := (
+  <url>http://typelevel.org/scalaz</url>
+  <licenses>
+    <license>
+      <name>MIT</name>
+      <url>http://www.opensource.org/licenses/mit-license.php</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <scm>
+    <url>https://github.com/scalaz/scalaz-stream</url>
+    <connection>scm:git:git://github.com/scalaz/scalaz-stream.git</connection>
+    <developerConnection>scm:git:git@github.com:scalaz/scalaz-stream.git</developerConnection>
+  </scm>
+  <developers>
+    <developer>
+      <id>pchiusano</id>
+      <name>Paul Chiusano</name>
+      <url>https://github.com/pchiusano</url>
+    </developer>
+  </developers>
+)
+
+net.virtualvoid.sbt.graph.Plugin.graphSettings
+

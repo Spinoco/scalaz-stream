@@ -6,6 +6,7 @@ import scalaz.concurrent.{Task, Strategy}
 import scalaz.\/._
 import scalaz.-\/
 import scalaz.\/-
+import scalaz.stream._
 
 object message {
 
@@ -47,7 +48,7 @@ object message {
     case class Publish[A](a:A, cb:(Throwable \/ Unit) => Unit) extends Msg[A]
     case class Fail[A](t:Throwable, cb:(Throwable \/ Unit) => Unit) extends Msg[A]
 
-    case class Subscribe[A](cb:(Throwable \/ SubscriberRef[A]) => Unit) extends Msg[A]
+    case class Subscribe[A](cb:(Throwable \/ (Seq[A],SubscriberRef[A])) => Unit, reconcile:Process1[A,A], buffer:Process1[A,A]) extends Msg[A]
     case class UnSubscribe[A](ref:SubscriberRef[A], cb:(Throwable \/ Unit) => Unit) extends Msg[A]
     case class Get[A](ref:SubscriberRef[A], cb: (Throwable \/ Seq[A]) => Unit) extends Msg[A]
 
@@ -59,16 +60,17 @@ object message {
     // all operations on this class are guaranteed to run on single thread,
     // however because actor`s handler closure is not capturing `cbOrQueue`
     // It must be tagged volatile
-    final class SubscriberRefInstance[A](@volatile var cbOrQueue : Queue[A] \/  ((Throwable \/ Seq[A]) => Unit))(implicit S:Strategy)
+    final class SubscriberRefInstance[A](@volatile var cbOrQueue : Process1[A,A] \/  ((Throwable \/ Seq[A]) => Unit)
+      , val buffer: Process1[A,A])(implicit S:Strategy)
       extends SubscriberRef[A] {
 
       //Publishes to subscriber or enqueue for next `Get`
       def publish(a:A)  =
         cbOrQueue = cbOrQueue.fold(
-          q => left(q.enqueue(a))
+          pq => left(pq.feed1(a))
           , cb => {
             S(cb(right(List(a))))
-            left(Queue())
+            left(buffer)
           }
         )
 
@@ -78,14 +80,16 @@ object message {
       //Gets new data or registers call back
       def get(cb:(Throwable \/ Seq[A]) => Unit) =
         cbOrQueue = cbOrQueue.fold(
-          q =>
+          l = { pq =>
+            val q = pq.flush
             if (q.isEmpty) {
               right(cb)
             } else {
               S(cb(right(q)))
-              left(Queue())
+              left(buffer)
             }
-          , cb => {
+          }
+          , r = cb => {
             // this is invalid state cannot have more than one callback
             // we will fail this new callback
             S(cb(left(new Exception("Only one callback allowed"))))
@@ -96,11 +100,12 @@ object message {
       //Fails the callback, or when something in Q, flushes it to callback
       def flush(cb:(Throwable \/ Seq[A]) => Unit, terminated: Throwable \/ Unit) =
         cbOrQueue = cbOrQueue.fold(
-          q => {
+          l = pq => {
+            val q = pq.flush
             if (q.isEmpty) cb(terminated.map(_=>Nil)) else cb(right(q))
-            left(Queue())
+            left(buffer)
           }
-          , cb => {
+          , r = cb => {
             S(cb(left(new Exception("Only one callback allowed"))))
             cbOrQueue
           }
