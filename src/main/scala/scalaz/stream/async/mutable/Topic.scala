@@ -40,26 +40,26 @@ trait Topic[A] {
    * Gets subscriber from this topic. There may be multiple subscribers to this topic. Subscriber
    * subscribes and un-subscribes when it is run or terminated.   
    */
-  val subscribe: Process[Task, A] = subscribe(id,Topic.buffer.all)
+  val subscribe: Process[Task, A] = subscribe(id, Topic.buffer.all)
 
   /**
    * Will get subscriber, that before will get any of `A` messages from this topic, it will 
    * try to reconcile the `journaled` messages published in this topic to some state of `A`.
-   * 
+   *
    * {{{
-   *    
-   *   
+   *
+   *
    *   import scalaz.stream.processes._
-   *   
+   *
    *   //this does not do any reconciliation and enqueue all messages when not ready to process them
    *   subscribe(id, Topic.buffer.all)
-   *   
+   *
    *   //this only emits last element during reconcile process and would not buffer any messages
    *   subscribe(last,Topic.buffer.none)
-   *   
-   *   
+   *
+   *
    * }}}
-   * 
+   *
    *
    * @param reconcile    Process that may filter, collect, or differently alter journaled messages 
    * @param buffer       Process to buffer all `A` fed to this subscriber from this topic, when the subscriber 
@@ -67,15 +67,17 @@ trait Topic[A] {
    *                     when there are messages that needs to be buffered.  
    */
   def subscribe(reconcile: Process1[A, A], buffer: Process1[A, A]): Process[Task, A] = {
-    await(Task.async[(Seq[A],SubscriberRef[A])](reg => actor ! Subscribe(reg, reconcile, buffer)))({
-      case (reconciled,sref) => 
-        emitAll(reconciled) ++ 
-        repeatEval(Task.async[Seq[A]] { reg => actor ! Get(sref, reg) })
-          .flatMap(l => emitAll(l))
-          .onComplete(eval(Task.async[Unit](reg => actor ! UnSubscribe(sref, reg))).drain)
-      }
-      , halt
-      , halt)
+    await(Task.async[(Seq[A], SubscriberRef[A])](reg => actor ! Subscribe(reg, reconcile, buffer)))({
+      case (reconciled, sref) =>
+        emitAll(reconciled) ++
+          repeatEval(Task.async[Seq[A]] {
+            reg => actor ! Get(sref, reg)
+          })
+            .flatMap(l => emitAll(l))
+            .onComplete(eval(Task.async[Unit](reg => actor ! UnSubscribe(sref, reg))).drain)
+    }
+    , halt
+    , halt)
   }
 
   /**
@@ -99,12 +101,11 @@ trait Topic[A] {
 }
 
 
-
 object Topic {
-  
-  
-  implicit class TopicSyntax[A](val self:Topic[A]) extends TopicOps[A] 
-  
+
+
+  implicit class TopicSyntax[A](val self: Topic[A]) extends TopicOps[A]
+
 
   object journal {
 
@@ -113,35 +114,38 @@ object Topic {
 
     /** Journal, that only keep last messages that are newer than given time **/
     def last[A](d: FiniteDuration): Process1[A, A] = {
-      def go(v:Vector[(Deadline,A)]) : Process1[A,A] = 
-        await1[A].flatMap { a =>
-          go(v.dropWhile(_._1.isOverdue()) :+ (d.fromNow, a))
+      def go(v: Vector[(Deadline, A)]): Process1[A, A] =
+        receive1[A, A] {
+          a =>
+            go(v.dropWhile(_._1.isOverdue()) :+(d.fromNow, a))
         } orElse emitAll(v.map(_._2))
       go(Vector())
     }
 
     /** Journal, that keeps only last `n` of elements */
-    def lastN[A](n:Int): Process1[A, A] = {
-      def go(v:Vector[A]) : Process1[A,A] =
-        await1[A].flatMap { a =>
-          if (v.size == n) {
-            go(v.tail :+ a)
-          } else {
-            go (v :+ a)
-          } 
+    def lastN[A](n: Int): Process1[A, A] = {
+      def go(v: Vector[A]): Process1[A, A] =
+        receive1[A, A] {
+          a =>
+            if (v.size == n) {
+              go(v.tail :+ a)
+            } else {
+              go(v :+ a)
+            }
         } orElse emitAll(v)
       go(Vector())
     }
 
     /** Journal, that keeps only the elements from keyframe for which `f` holds true **/
     def keyFrame[A](f: A => Boolean): Process1[A, A] = {
-      def go(v:Vector[A]) : Process1[A,A] =
-        await1[A].flatMap { a =>
-          if (f(a)) {
-            go(Vector(a))
-          } else {
-            go(v :+ a)
-          } 
+      def go(v: Vector[A]): Process1[A, A] =
+        receive1[A, A] {
+          a =>
+            if (f(a)) {
+              go(Vector(a))
+            } else {
+              go(v :+ a)
+            }
         } orElse emitAll(v)
       go(Vector())
     }
@@ -152,13 +156,11 @@ object Topic {
     /** Buffers all elements as they are published in topic **/
     def all[A]: Process1[A, A] = {
       def go(v: Vector[A]): Process1[A, A] =
-        await1[A].flatMap(a => go(v :+ a)) orElse (emitAll(v))
+        receive1[A, A](a => go(v :+ a)) orElse (emitAll(v))
       go(Vector())
     }
 
   }
-  
-
 
 
 }
