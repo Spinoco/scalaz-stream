@@ -67,7 +67,7 @@ object WyeActor {
 
     //returns true when the process is cleaned, or runs the cleanup and returns false
     //if process is running is no-op and returns false
-    def runCleanup(a: Actor[Msg], e: Throwable): Boolean =  step match {
+    def runCleanup(a: Actor[Msg], e: Throwable)(implicit S:Strategy): Boolean =  step match {
         case \/-(s) if s.isCleaned => true
         case \/-(s) => runClean(s.cleanup, e, a); false
         case -\/(c) if cleanup.get == false =>
@@ -76,22 +76,22 @@ object WyeActor {
         case -\/(c) => false
       }
 
-    def pull(a: Actor[Msg]): Boolean =  step match {
+    def pull(a: Actor[Msg])(implicit S:Strategy): Boolean =  step match {
         case \/-(s) if s.isCleaned => false
         case \/-(s) if s.isHalted => runClean(s.cleanup,End,a) ; true
         case \/-(s) => run(s.tail,a) ; true
         case -\/(c) => false // request`s task is in process
       }
 
-    private def runClean(c:Process[Task,A], e: Throwable, actor: Actor[Msg]) : Unit = {
+    private def runClean(c:Process[Task,A], e: Throwable, actor: Actor[Msg])(implicit S:Strategy) : Unit = {
       cleanup.set(true)
       step = -\/(halt)
-      c.causedBy(e).run.runAsync { cb => actor ! Ready(this, cb.map(_ => Step.failed(e)))}
+      S(c.causedBy(e).run.runAsync { cb => actor ! Ready(this, cb.map(_ => Step.failed(e)))})
     }
 
-    private def run(s: Process[Task, A], actor: Actor[Msg]): Unit = {
+    private def run(s: Process[Task, A], actor: Actor[Msg])(implicit S:Strategy): Unit = {
       step = -\/(s.cleanup)
-      s.runStep.runAsyncInterruptibly ({ cb => actor ! Ready(this, cb) },cleanup)
+      S(s.runStep.runAsyncInterruptibly ({ cb => actor ! Ready(this, cb) },cleanup))
     }
   }
 
@@ -108,7 +108,7 @@ object WyeActor {
    * @tparam O Output type of resulting process
    * @return Process with merged elements.
    */
-  def wyeActor[L, R, O](pl: Process[Task, L], pr: Process[Task, R])(y: Wye[L, R, O])(S: Strategy): Process[Task, O] = {
+  def wyeActor[L, R, O](pl: Process[Task, L], pr: Process[Task, R])(y: Wye[L, R, O])(implicit S: Strategy): Process[Task, O] = {
 
     //current state of the wye
     var yy: Wye[L, R, O] = y
