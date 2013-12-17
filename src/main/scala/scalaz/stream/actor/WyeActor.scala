@@ -224,7 +224,7 @@ object WyeActor {
    * @tparam O Output type of resulting process
    * @return Process with merged elements.
    */
-  def wyeActor[L, R, O](pl: Process[Task, L], pr: Process[Task, R])(y: Wye[L, R, O])(S: Strategy): Process[Task, O] = {
+  def wyeActor[L, R, O](pl: Process[Task, L], pr: Process[Task, R])(y: Wye[L, R, O])(implicit S: Strategy): Process[Task, O] = {
 
     //current state of the wye
     var yy: Wye[L, R, O] = y

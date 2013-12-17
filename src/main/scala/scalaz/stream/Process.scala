@@ -111,7 +111,11 @@ sealed abstract class Process[+F[_],+O] {
    */
   final def fby[F2[x]>:F[x],O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
     case h@Halt(e) => e match {
-      case End => p2
+      case End =>
+        try p2
+          catch { case End => h
+          case e2: Throwable => Halt(e2)
+        }
       case _ => h
     }
     case Emit(h, t) => emitSeq(h, t fby p2)
@@ -223,20 +227,31 @@ sealed abstract class Process[+F[_],+O] {
    * Append to the `fallback` and `cleanup` arguments of the _next_ `Await`.
    */
   final def orElse[F2[x]>:F[x],O2>:O](fallback0: => Process[F2,O2], cleanup0: => Process[F2,O2] = halt): Process[F2,O2] = {
-    lazy val fallback: Process[F2,O2] = fallback0 match {
-      case Emit(h, t) => Emit(h.view.asInstanceOf[Seq[O2]], t.asInstanceOf[Process[F2,O2]])
-      case _ => fallback0
+    lazy val fallback: Process[F2,O2] = try {
+      fallback0 match {
+        case Emit(h, t) => Emit(h.view.asInstanceOf[Seq[O2]], t.asInstanceOf[Process[F2,O2]])
+        case _ => fallback0
+      }
+    } catch {
+      case e: Throwable => Halt(e)
     }
-    lazy val cleanup: Process[F2,O2] = cleanup0 match {
-      case Emit(h, t) => Emit(h.view.asInstanceOf[Seq[O2]], t.asInstanceOf[Process[F2,O2]])
-      case _ => cleanup0
+
+    lazy val cleanup: Process[F2,O2] = try {
+      cleanup0 match {
+        case Emit(h, t) => Emit(h.view.asInstanceOf[Seq[O2]], t.asInstanceOf[Process[F2,O2]])
+        case _ => cleanup0
+      }
+    } catch {
+      case e: Throwable => Halt(e)
     }
+
     def go(cur: Process[F,O]): Process[F2,O2] = cur match {
       case Await(req,recv,fb,c) => Await(req, recv, fb ++ fallback, c ++ cleanup)
       case Emit(h, t) => Emit(h, go(t))
       case h@Halt(_) => h
     }
     go(this)
+
   }
 
   /**
@@ -576,6 +591,10 @@ sealed abstract class Process[+F[_],+O] {
   def collect[O2](pf: PartialFunction[O,O2]): Process[F,O2] =
     this |> process1.collect(pf)
 
+  /** Alias for `this |> process1.collectFirst(pf)`. */
+  def collectFirst[O2](pf: PartialFunction[O,O2]): Process[F,O2] =
+    this |> process1.collectFirst(pf)
+
   /** Alias for `this |> process1.split(f)` */
   def split(f: O => Boolean): Process[F,Vector[O]] =
     this |> process1.split(f)
@@ -798,8 +817,16 @@ object Process {
    */
   type Writer[+F[_],+W,+O] = Process[F, W \/ O]
 
-  /** A `Process1` that writes values of type `W`. */
-  type Process1W[+W,-I,+O] = Process1[I,W \/ O]
+  /**
+   * Simillar to `Writer` except when fed with `I` will produce
+   * either new written value `W` or just produces the
+   * value `O`
+   *
+   * This is usefull in `WriterTopic` that allows to share common
+   * state between processes together with updates that created
+   * new state.
+   */
+  type Writer1[+W,-I,+O] = Process1[I,W \/ O]
 
   /** A `Tee` that writes values of type `W`. */
   type TeeW[+W,-I,-I2,+O] = Tee[I,I2,W \/ O]
@@ -1226,7 +1253,7 @@ object Process {
     p.flatMap(a => emitAll(Vector(left(a), right(a))))
 
   /** `Writer` based version of `await1`. */
-  def await1W[A]: Process1W[Nothing,A,A] =
+  def await1W[A]: Writer1[Nothing,A,A] =
     liftW(Process.await1[A])
 
   /** `Writer` based version of `awaitL`. */
