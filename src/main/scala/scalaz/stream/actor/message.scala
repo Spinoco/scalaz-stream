@@ -33,13 +33,6 @@ object message {
     def fail[A](err: Throwable, cancel: Boolean = false): Msg[A] = Close(err, cancel)
   }
 
-  object ref {
-    sealed trait Msg[A]
-    case class Set[A](f:Option[A] => Option[A], cb:(Throwable \/ Option[A]) => Unit, returnOld:Boolean) extends Msg[A]
-    case class Get[A](callback: (Throwable \/ (Int,A)) => Unit,onChange:Boolean,last:Int) extends Msg[A]
-    case class Fail[A](t:Throwable, callback:Throwable => Unit) extends Msg[A]
-  }
-
 
 }
 
