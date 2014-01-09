@@ -833,7 +833,7 @@ object Process {
    * state between processes together with updates that created
    * new state.
    */
-  type Writer1[+W,-I,+O] = Process1[I,W \/ O]
+  type Process1W[+W,-I,+O] = Process1[I,W \/ O]
 
   /** Alias for Process1W **/
   type Writer1[+W,-I,+O] = Process1W[W,I,O]
