@@ -10,7 +10,7 @@ version := (Option(System.getenv("BUILD_NUMBER")) orElse (Option(System.getPrope
                            })
                          
 
-scalaVersion := "2.10.1"
+scalaVersion := "2.10.2"
 
 scalacOptions ++= Seq(
   "-feature",
@@ -20,12 +20,12 @@ scalacOptions ++= Seq(
   "-language:postfixOps"
 )
 
-conflictManager := ConflictManager.strict
+//conflictManager := ConflictManager.strict
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-concurrent" % "7.0.4" ,
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4" % "test" ,
-  "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.5" ,
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.5" % "test" ,
+  "org.scalacheck" %% "scalacheck" % "1.10.1" % "test"
 )
 
 resolvers ++= Seq(
