@@ -120,6 +120,20 @@ object ProcessSpec extends Properties("Process1") {
     })
   }
 
+  property("awaitOption") = secure {
+    Process().pipe(awaitOption).toList == List(None) &&
+    Process(1, 2).pipe(awaitOption).toList == List(Some(1))
+  }
+
+  property("chunk") = secure {
+    Process(0, 1, 2, 3, 4).chunk(2).toList == List(Vector(0, 1), Vector(2, 3), Vector(4))
+  }
+
+  property("chunkBy") = secure {
+    emitSeq("foo bar baz").chunkBy(_ != ' ').toList.map(_.mkString) ==
+      List("foo ", "bar ", "baz")
+  }
+
   property("fill") = forAll(Gen.choose(0,30).map2(Gen.choose(0,50))((_,_))) {
     case (n,chunkSize) => Process.fill(n)(42, chunkSize).runLog.run.toList == List.fill(n)(42)
   }
@@ -128,10 +142,21 @@ object ProcessSpec extends Properties("Process1") {
     Process.iterate(0)(_ + 1).take(100).runLog.run.toList == List.iterate(0, 100)(_ + 1)
   }
 
+  property("terminated") = secure {
+    Process(1, 2, 3).terminated.toList == List(Some(1), Some(2), Some(3), None)
+  }
+
   property("unfold") = secure {
     Process.unfold((0, 1)) {
       case (f1, f2) => if (f1 <= 13) Some((f1, f2), (f2, f1 + f2)) else None
     }.map(_._1).runLog.run.toList == List(0, 1, 1, 2, 3, 5, 8, 13)
+  }
+
+  property("window") = secure {
+    def window(n: Int) = Process.range(0, 5).window(n).runLog.run.toList
+    window(1) == List(Vector(0), Vector(1), Vector(2), Vector(3), Vector(4), Vector()) &&
+    window(2) == List(Vector(0, 1), Vector(1, 2), Vector(2, 3), Vector(3, 4), Vector(4)) &&
+    window(3) == List(Vector(0, 1, 2), Vector(1, 2, 3), Vector(2, 3, 4), Vector(3, 4))
   }
 
   import scalaz.concurrent.Task

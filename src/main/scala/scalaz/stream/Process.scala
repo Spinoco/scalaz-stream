@@ -22,6 +22,7 @@ import scalaz.stream.ReceiveY.ReceiveL
 import scalaz.\/-
 import scalaz.-\/
 import scalaz.stream.ReceiveY.ReceiveR
+import scalaz.stream.wye.AwaitL
 
 /**
  * A `Process[F,O]` represents a stream of `O` values which can interleave
@@ -380,7 +381,7 @@ sealed abstract class Process[+F[_],+O] {
     case Await1(recv,fb,c) => this.step.flatMap { s =>
       s.fold { hd =>
         s.tail pipe (process1.feed(hd)(p2))
-      } (halt pipe fb, halt pipe c)
+      } (halt pipe fb, e => fail(e) pipe c)
     }
   }
 
@@ -407,12 +408,12 @@ sealed abstract class Process[+F[_],+O] {
       case AwaitL(recv,fb,c) => this.step.flatMap { s =>
         s.fold { hd =>
           s.tail.tee(p2)(scalaz.stream.tee.feedL(hd)(t))
-        } (halt.tee(p2)(fb), halt.tee(p2)(c))
+        } (halt.tee(p2)(fb), e => fail(e).tee(p2)(c))
       }
       case AwaitR(recv,fb,c) => p2.step.flatMap { s =>
         s.fold { hd =>
           this.tee(s.tail)(scalaz.stream.tee.feedR(hd)(t))
-        } (this.tee(halt)(fb), this.tee(halt)(c))
+        } (this.tee(halt)(fb), e => this.tee(fail(e))(c))
       }
     }
   }
@@ -1065,14 +1066,17 @@ object Process {
    *
    * Note: The last emitted range may be truncated at `stopExclusive`. For
    * instance, `ranges(0,5,4)` results in `(0,4), (4,5)`.
+   *
+   * @throws IllegalArgumentException if `size` <= 0
    */
-  def ranges(start: Int, stopExclusive: Int, size: Int): Process[Task, (Int, Int)] =
-    if (size <= 0) sys.error("size must be > 0, was: " + size)
-    else unfold(start)(lower =>
+  def ranges(start: Int, stopExclusive: Int, size: Int): Process[Task, (Int, Int)] = {
+    require(size > 0, "size must be > 0, was: " + size)
+    unfold(start)(lower =>
       if (lower < stopExclusive)
         Some((lower -> ((lower+size) min stopExclusive), lower+size))
       else
         None)
+  }
 
   /**
    * A supply of `Long` values, starting with `initial`.
@@ -1630,6 +1634,9 @@ object Process {
 
     private[stream] def contramapR_[I3](f: I3 => I2): Wye[I, I3, O] =
       self.attachR(process1.lift(f))
+
+
+
   }
 
   implicit class ChannelSyntax[F[_],I,O](self: Channel[F,I,O]) {
