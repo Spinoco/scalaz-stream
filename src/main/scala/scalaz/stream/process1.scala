@@ -334,6 +334,30 @@ trait process1 {
   def reduceMap[A,B](f: A => B)(implicit M: Monoid[B]): Process1[A,B] =
     id[A].map(f).reduceMonoid(M)
 
+  /**
+   * Repartitions the input with the function `p`. On each step `p` is applied
+   * to the input and all elements but the last of the resulting sequence
+   * are emitted. The last element is then prepended to the next input using the
+   * Semigroup `I`. For example,
+   * {{{
+   * Process("Hel", "l", "o Wor", "ld").repartition(_.split(" ").toIndexedSeq) ==
+   *   Process("Hello", "World")
+   * }}}
+   */
+  def repartition[I](p: I => IndexedSeq[I])(implicit I: Semigroup[I]): Process1[I,I] = {
+    def go(carry: Option[I]): Process1[I,I] =
+      await1[I].flatMap { i =>
+        val next = carry.fold(i)(c => I.append(c, i))
+        val parts = p(next)
+        parts.size match {
+          case 0 => go(None)
+          case 1 => go(Some(parts.head))
+          case _ => emitSeq(parts.init) fby go(Some(parts.last))
+        }
+      } orElse emitSeq(carry.toList)
+    go(None)
+  }
+
   /** Throws any input exceptions and passes along successful results. */
   def rethrow[A]: Process1[Throwable \/ A, A] =
     await1[Throwable \/ A].flatMap {
@@ -409,13 +433,6 @@ trait process1 {
     go(Vector())
   }
 
-  /** Remove any `None` inputs. */
-  def stripNone[A]: Process1[Option[A],A] =
-    await1[Option[A]].flatMap {
-      case None => stripNone
-      case Some(a) => emit(a) ++ stripNone
-    }
-
   /**
    * Break the input into chunks where the input is equal to the given delimiter.
    * The delimiter does not appear in the output. Two adjacent delimiters in the
@@ -423,6 +440,31 @@ trait process1 {
    */
   def splitOn[I:Equal](i: I): Process1[I, Vector[I]] =
     split(_ === i)
+
+  /**
+   * Breaks the input into chunks that alternatively satisfy and don't satisfy
+   * the predicate `f`.
+   * {{{
+   * Process(1,2,-3,-4,5,6).splitWith(_ < 0).toList ==
+   *   List(Vector(1,2), Vector(-3,-4), Vector(5,6))
+   * }}}
+   */
+  def splitWith[I](f: I => Boolean): Process1[I,Vector[I]] = {
+    def go(acc: Vector[I], last: Boolean): Process1[I,Vector[I]] =
+      await1[I].flatMap { i =>
+        val cur = f(i)
+        if (cur == last) go(acc :+ i, cur)
+        else emit(acc) fby go(Vector(i), cur)
+      } orElse emit(acc)
+    await1[I].flatMap(i => go(Vector(i), f(i)))
+  }
+
+  /** Remove any `None` inputs. */
+  def stripNone[A]: Process1[Option[A],A] =
+    await1[Option[A]].flatMap {
+      case None => stripNone
+      case Some(a) => emit(a) ++ stripNone
+    }
 
   /**
    * Emit a running sum of the values seen so far. The first value emitted will be the

@@ -2,6 +2,7 @@ package scalaz.stream
 
 import scalaz._
 import scalaz.syntax.equal._
+import scalaz.syntax.foldable._
 import scalaz.std.anyVal._
 import scalaz.std.list._
 import scalaz.std.list.listSyntax._
@@ -93,6 +94,9 @@ object ProcessSpec extends Properties("Process1") {
        p.toList.scan(0)(_ + _).tail ===
        p.toSource.scan1(_ + _).runLog.timed(3000).run.toList
     }) &&
+    ("splitWith" |: {
+      p.splitWith(_ < n).toList.map(_.toList) === p.toList.splitWith(_ < n)
+    }) &&
     ("sum" |: {
       p.toList.sum[Int] ===
       p.toSource.pipe(process1.sum).runLastOr(0).timed(3000).run
@@ -140,6 +144,17 @@ object ProcessSpec extends Properties("Process1") {
 
   property("iterate") = secure {
     Process.iterate(0)(_ + 1).take(100).runLog.run.toList == List.iterate(0, 100)(_ + 1)
+  }
+
+  property("repartition") = secure {
+    Process("Lore", "m ip", "sum dolo", "r sit amet").repartition(_.split(" ").toIndexedSeq).toList ==
+      List("Lorem", "ipsum", "dolor", "sit", "amet") &&
+    Process("hel", "l", "o Wor", "ld").repartition(_.grouped(2).toVector).toList ==
+      List("he", "ll", "o ", "Wo", "rl", "d") &&
+    Process(1, 2, 3, 4, 5).repartition(i => Vector(i, i)).toList ==
+      List(1, 3, 6, 10, 15, 15) &&
+    (Process(): Process[Nothing, String]).repartition(_ => Vector()).toList == List() &&
+    Process("hello").repartition(_ => Vector()).toList == List()
   }
 
   property("terminated") = secure {
