@@ -17,7 +17,9 @@ scalacOptions ++= Seq(
   "-language:implicitConversions",
   "-language:higherKinds",
   "-language:existentials",
-  "-language:postfixOps"
+  "-language:postfixOps",
+  "-Xfatal-warnings",
+  "-Yno-adapted-args"
 )
 
 //conflictManager := ConflictManager.strict
