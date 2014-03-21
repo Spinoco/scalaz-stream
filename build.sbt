@@ -3,14 +3,14 @@ organization := "spinoco"
 name := "scalaz-stream"
 
 version := (Option(System.getenv("BUILD_NUMBER")) orElse (Option(System.getProperty("BUILD_NUMBER")))).map(buildNo => {
-                             "0.1.0." +  buildNo + "-SNAPSHOT"
+                             "0.4.0." +  buildNo + "-SNAPSHOT"
                            }).getOrElse({
                              val df = new java.text.SimpleDateFormat("yyMMddHHmmss")
                              "0.1.0.T" + df.format(new java.util.Date()) + "-SNAPSHOT"
                            })
                          
 
-scalaVersion := "2.10.2"
+scalaVersion := "2.10.3"
 
 scalacOptions ++= Seq(
   "-feature",
@@ -25,8 +25,10 @@ scalacOptions ++= Seq(
 //conflictManager := ConflictManager.strict
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-concurrent" % "7.0.5" ,
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.5" % "test" ,
+  "org.scalaz" %% "scalaz-core" % "7.0.6",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.6",
+  "org.typelevel" %% "scodec-bits" % "1.0.0-RC2",
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.6" % "test",
   "org.scalacheck" %% "scalacheck" % "1.10.1" % "test"
 )
 

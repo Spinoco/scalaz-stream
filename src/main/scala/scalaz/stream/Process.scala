@@ -7,7 +7,7 @@ import scala.concurrent.duration._
 import scalaz.{Catchable,Functor,Monad,Cobind,MonadPlus,Monoid,Nondeterminism,Semigroup}
 import scalaz.concurrent.{Strategy, Task}
 import scalaz.Leibniz.===
-import scalaz.{\/,-\/,\/-,~>,Leibniz,Equal}
+import scalaz.{\/,-\/,\/-,~>,Leibniz,Equal,Order}
 import scalaz.std.stream._
 import scalaz.syntax.foldable._
 import \/._
@@ -22,6 +22,7 @@ import scalaz.stream.ReceiveY.ReceiveL
 import scalaz.\/-
 import scalaz.-\/
 import scalaz.stream.ReceiveY.ReceiveR
+import java.util.concurrent.atomic.AtomicBoolean
 import scalaz.stream.wye.AwaitL
 
 /**
@@ -92,18 +93,21 @@ sealed abstract class Process[+F[_],+O] {
    * Note that `p2` is appended to the `fallback` argument of any `Await`
    * produced by this `Process`. If this is not desired, use `fby`.
    */
-  final def append[F2[x]>:F[x], O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
-    case h@Halt(e) => e match {
-      case End =>
-        try p2
-        catch { case End => h
-                case e2: Throwable => Halt(e2)
-              }
-      case _ => h
+  final def append[F2[x]>:F[x], O2>:O](p: => Process[F2,O2]): Process[F2,O2] = {
+    lazy val p2 = p
+    this match {
+      case h@Halt(e) => e match {
+        case End =>
+          try p2
+          catch { case End => h
+          case e2: Throwable => Halt(e2)
+          }
+        case _ => h
+      }
+      case Emit(h, t) => emitSeq(h, t append p2)
+      case Await(req,recv,fb,c) =>
+        Await(req, recv andThen (_ append p2), fb append p2, c)
     }
-    case Emit(h, t) => emitSeq(h, t append p2)
-    case Await(req,recv,fb,c) =>
-      Await(req, recv andThen (_ append p2), fb append p2, c)
   }
 
   /** Operator alias for `append`. */
@@ -117,18 +121,21 @@ sealed abstract class Process[+F[_],+O] {
    * we do not modify the `fallback` arguments to any `Await` produced
    * by this `Process`.
    */
-  final def fby[F2[x]>:F[x],O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
-    case h@Halt(e) => e match {
-      case End =>
-        try p2
+  final def fby[F2[x]>:F[x],O2>:O](p: => Process[F2,O2]): Process[F2,O2] = {
+    lazy val p2 = p
+    this match {
+      case h@Halt(e) => e match {
+        case End =>
+          try p2
           catch { case End => h
           case e2: Throwable => Halt(e2)
-        }
-      case _ => h
+          }
+        case _ => h
+      }
+      case Emit(h, t) => emitSeq(h, t fby p2)
+      case Await(req,recv,fb,c) =>
+        Await(req, recv andThen (_ fby p2), fb, c)
     }
-    case Emit(h, t) => emitSeq(h, t fby p2)
-    case Await(req,recv,fb,c) =>
-      Await(req, recv andThen (_ fby p2), fb, c)
   }
 
   /** operator alias for `fby` */
@@ -265,15 +272,18 @@ sealed abstract class Process[+F[_],+O] {
   /**
    * Run `p2` after this `Process` if this `Process` completes with an an error.
    */
-  final def onFailure[F2[x]>:F[x],O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
-    case Await(req,recv,fb,c) => Await(req, recv andThen (_.onFailure(p2)), fb, c onComplete p2)
-    case Emit(h, t) => Emit(h, t.onFailure(p2))
-    case h@Halt(End) => this
-    case h@Halt(e) =>
-      try p2.causedBy(e)
-      catch { case End => h
-              case e2: Throwable => Halt(CausedBy(e2, e))
-            }
+  final def onFailure[F2[x]>:F[x],O2>:O](p: => Process[F2,O2]): Process[F2,O2] = {
+    lazy val p2 = p
+    this match {
+      case Await(req,recv,fb,c) => Await(req, recv andThen (_.onFailure(p2)), fb, c onComplete p2)
+      case Emit(h, t) => Emit(h, t.onFailure(p2))
+      case h@Halt(End) => this
+      case h@Halt(e) =>
+        try p2.causedBy(e)
+        catch { case End => h
+        case e2: Throwable => Halt(CausedBy(e2, e))
+        }
+    }
   }
 
   /**
@@ -281,14 +291,17 @@ sealed abstract class Process[+F[_],+O] {
    * This behaves almost identically to `append`, except that `p1 append p2` will
    * not run `p2` if `p1` halts with an error.
    */
-  final def onComplete[F2[x]>:F[x],O2>:O](p2: => Process[F2,O2]): Process[F2,O2] = this match {
-    case Await(req,recv,fb,c) => Await(req, recv andThen (_.onComplete(p2)), fb.onComplete(p2), c.onComplete(p2))
-    case Emit(h, t) => Emit(h, t.onComplete(p2))
-    case h@Halt(e) =>
-      try p2.causedBy(e)
-      catch { case End => h
-              case e2: Throwable => Halt(CausedBy(e2, e))
-            }
+  final def onComplete[F2[x]>:F[x],O2>:O](p: => Process[F2,O2]): Process[F2,O2] = {
+    lazy val p2 = p
+    this match {
+      case Await(req,recv,fb,c) => Await(req, recv andThen (_.onComplete(p2)), fb.onComplete(p2), c.onComplete(p2))
+      case Emit(h, t) => Emit(h, t.onComplete(p2))
+      case h@Halt(e) =>
+        try p2.causedBy(e)
+        catch { case End => h
+        case e2: Throwable => Halt(CausedBy(e2, e))
+        }
+    }
   }
 
   /**
@@ -676,6 +689,30 @@ sealed abstract class Process[+F[_],+O] {
   def last: Process[F,O] =
     this |> process1.last
 
+  /** Alias for `this |> [[process1.maximum]]`. */
+  def maximum[O2 >: O](implicit O2: Order[O2]): Process[F,O2] =
+    this |> process1.maximum(O2)
+
+  /** Alias for `this |> [[process1.maximumBy]](f)`. */
+  def maximumBy[B: Order](f: O => B): Process[F,O] =
+    this |> process1.maximumBy(f)
+
+  /** Alias for `this |> [[process1.maximumOf]](f)`. */
+  def maximumOf[B: Order](f: O => B): Process[F,B] =
+    this |> process1.maximumOf(f)
+
+  /** Alias for `this |> [[process1.minimum]]`. */
+  def minimum[O2 >: O](implicit O2: Order[O2]): Process[F,O2] =
+    this |> process1.minimum(O2)
+
+  /** Alias for `this |> [[process1.minimumBy]](f)`. */
+  def minimumBy[B: Order](f: O => B): Process[F,O] =
+    this |> process1.minimumBy(f)
+
+  /** Alias for `this |> [[process1.minimumOf]](f)`. */
+  def minimumOf[B: Order](f: O => B): Process[F,B] =
+    this |> process1.minimumOf(f)
+
   /** Alias for `this |> [[process1.reduce]](f)`. */
   def reduce[O2 >: O](f: (O2,O2) => O2): Process[F,O2] =
     this |> process1.reduce(f)
@@ -693,8 +730,12 @@ sealed abstract class Process[+F[_],+O] {
     this |> process1.reduceSemigroup(M)
 
   /** Alias for `this |> [[process1.repartition]](p)(S)` */
-  def repartition[O2 >: O](p: O2 => IndexedSeq[O2])(implicit S: Semigroup[O2]): Process[F,O2] =
+  def repartition[O2 >: O](p: O2 => collection.IndexedSeq[O2])(implicit S: Semigroup[O2]): Process[F,O2] =
     this |> process1.repartition(p)(S)
+
+  /** Alias for `this |> [[process1.repartition2]](p)(S)` */
+  def repartition2[O2 >: O](p: O2 => (Option[O2], Option[O2]))(implicit S: Semigroup[O2]): Process[F,O2] =
+    this |> process1.repartition2(p)(S)
 
   /** Alias for `this |> [[process1.scan]](b)(f)`. */
   def scan[B](b: B)(f: (B,O) => B): Process[F,B] =
@@ -1152,6 +1193,10 @@ object Process {
     Emit[Nothing,O](List(()).view.map(_ => hd), halt)
   }
 
+  def emitSeqLazy[O](seq: => Seq[O]): Process[Nothing,O] = {
+    lazy val lazySeq = seq
+    Emit[Nothing,O](List(()).view.flatMap(_ => lazySeq), halt)
+  }
 
   implicit def processInstance[F[_]]: MonadPlus[({type f[x] = Process[F,x]})#f] =
   new MonadPlus[({type f[x] = Process[F,x]})#f] {
@@ -1835,6 +1880,22 @@ object Process {
    */
   def suspend[A](p: => Process[Task, A]): Process[Task, A] =
     await(Task.now {})(_ => p)
+
+  /**
+   * Produces a process from `p` that is guaranteed to be run only once
+   * That means, if this process has been already run, it will instead of
+   * running itself just halt.
+   * @param p
+   * @tparam A
+   * @return
+   */
+  def idempotent[A](p:Process[Task,A]):Process[Task,A] = {
+    val started = new AtomicBoolean(false)
+    eval(Task.delay(started.compareAndSet(false,true))).flatMap {
+      case true => p
+      case false => halt
+    }
+  }
 
   /**
    * Feed the output of `f` back in as its input. Note that deadlock
