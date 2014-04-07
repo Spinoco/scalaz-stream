@@ -3,32 +3,33 @@ organization := "spinoco"
 name := "scalaz-stream"
 
 version := (Option(System.getenv("BUILD_NUMBER")) orElse (Option(System.getProperty("BUILD_NUMBER")))).map(buildNo => {
-                             "0.1.0." +  buildNo + "-SNAPSHOT"
+                             "0.4.0." +  buildNo + "-SNAPSHOT"
                            }).getOrElse({
                              val df = new java.text.SimpleDateFormat("yyMMddHHmmss")
                              "0.1.0.T" + df.format(new java.util.Date()) + "-SNAPSHOT"
                            })
                          
 
-scalaVersion := "2.10.2"
+scalaVersion := "2.10.3"
 
 scalacOptions ++= Seq(
   "-feature",
   "-language:implicitConversions",
   "-language:higherKinds",
   "-language:existentials",
-  "-language:postfixOps"
+  "-language:postfixOps",
+  "-Xfatal-warnings",
+  "-Yno-adapted-args"
 )
 
-// https://github.com/sbt/sbt/issues/603
-conflictWarning ~= { cw =>
-  cw.copy(level = Level.Error, filter = (id: ModuleID) => true, group = (id: ModuleID) => id.organization + ":" + id.name)
-}
+//conflictManager := ConflictManager.strict
 
 libraryDependencies ++= Seq(
-  "org.scalaz" %% "scalaz-concurrent" % "7.0.4-S1-SNAPSHOT",
-  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.4-S1-SNAPSHOT" % "test",
-  "org.scalacheck" %% "scalacheck" % "1.10.0" % "test"
+  "org.scalaz" %% "scalaz-core" % "7.0.6",
+  "org.scalaz" %% "scalaz-concurrent" % "7.0.6",
+  "org.typelevel" %% "scodec-bits" % "1.0.0-RC2",
+  "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.6" % "test",
+  "org.scalacheck" %% "scalacheck" % "1.10.1" % "test"
 )
 
 resolvers ++= Seq(
@@ -55,30 +56,9 @@ credentials += {
   }
 }
 
-pomIncludeRepository := Function.const(false)
+publishMavenStyle := true
 
-pomExtra := (
-  <url>http://typelevel.org/scalaz</url>
-  <licenses>
-    <license>
-      <name>MIT</name>
-      <url>http://www.opensource.org/licenses/mit-license.php</url>
-      <distribution>repo</distribution>
-    </license>
-  </licenses>
-  <scm>
-    <url>https://github.com/scalaz/scalaz-stream</url>
-    <connection>scm:git:git://github.com/scalaz/scalaz-stream.git</connection>
-    <developerConnection>scm:git:git@github.com:scalaz/scalaz-stream.git</developerConnection>
-  </scm>
-  <developers>
-    <developer>
-      <id>pchiusano</id>
-      <name>Paul Chiusano</name>
-      <url>https://github.com/pchiusano</url>
-    </developer>
-  </developers>
-)
+licenses += ("MIT", url("http://opensource.org/licenses/MIT"))
 
 net.virtualvoid.sbt.graph.Plugin.graphSettings
 

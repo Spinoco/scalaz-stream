@@ -3,7 +3,6 @@ package scalaz.stream
 import scalaz.concurrent.Task
 import scalaz._
 import scalaz.\/._
-import Process.{Process1, Sink}
 
 import org.scalacheck._
 import Prop._
@@ -122,11 +121,11 @@ object CreatingStreams extends Properties("creating-streams") {
                .map(_.toString)
     
     /* 
-    `collect` returns the sequence of values emitted by a source,
+    `runLog` returns the sequence of values emitted by a source,
     as a `Task`. Nothing happens until we run this `Task`, and
     we can run this `Task` again to repeat the entire `Process`
     */
-    val r: Task[collection.immutable.IndexedSeq[String]] = oddsGt10.collect
+    val r: Task[collection.immutable.IndexedSeq[String]] = oddsGt10.runLog
 
     /*
     At the end of the universe, we can `run` the `Task`
@@ -138,7 +137,7 @@ object CreatingStreams extends Properties("creating-streams") {
     /*
     Recall we can use `run` if we want to evaluate a stream just
     for its effects. Generally, we'll use `run` rather than using
-    `collect`. If we want to do something further with the values 
+    `runLog`. If we want to do something further with the values
     emitted from a stream, we can just feed the stream to another
     transformation, sink, or channel. See `TransformingStreams.scala`
     for more examples of this. Here's `t1` adapted:
