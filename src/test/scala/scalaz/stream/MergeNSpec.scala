@@ -58,13 +58,15 @@ object MergeNSpec extends Properties("mergeN") {
     val cleanups = new AtomicInteger(0)
     val srcCleanup = new AtomicInteger(0)
 
-    def oneUp(index:Int) = (emit(index).toSource ++ Process.awakeEvery(10 seconds).map(_=>index)) onComplete
-      affine(eval(Task.fork(Task.delay{val i = cleanups.incrementAndGet();Thread.sleep(100);i})))
+    def oneUp(index:Int) = {
+      val cln = affine(eval(Task.fork(Task.delay{val i = cleanups.incrementAndGet();Thread.sleep(100);i})))
+      (emit(index).toSource ++ Process.awakeEvery(10 seconds).map(_=>index)) onComplete cln
+    }
 
-    val ps =
-      (emitSeq(for (i <- 0 until 10) yield oneUp(i)).toSource ++ Process.awakeEvery(10 seconds).drain) onComplete
-        affine(eval_(Task.delay(srcCleanup.set(99))))
-
+    val ps = {
+      val cln = affine(eval_(Task.delay(srcCleanup.set(99))))
+      (emitSeq(for (i <- 0 until 10) yield oneUp(i)).toSource ++ Process.awakeEvery(10 seconds).drain) onComplete cln
+    }
 
     merge.mergeN(ps).takeWhile(_ < 9).runLog.timed(3000).run
 
