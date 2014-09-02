@@ -116,7 +116,7 @@ case class CausedBy(e: Throwable, cause: Throwable) extends Exception(cause) {
 case class Terminated(cause:Cause) extends Exception {
   override def fillInStackTrace(): Throwable = cause match {
     case End | Kill => this
-    case Error(rsn) => rsn.fillInStackTrace()
+    case Error(rsn) => rsn
   }
   override def toString: String = s"Terminated($cause)"
   override def getMessage: String = cause.toString
