@@ -18,7 +18,7 @@ scalacOptions ++= Seq(
   "-language:higherKinds",
   "-language:existentials",
   "-language:postfixOps",
-  "-Xfatal-warnings",
+  //"-Xfatal-warnings",
   "-Yno-adapted-args"
 )
 
@@ -27,9 +27,9 @@ scalacOptions ++= Seq(
 libraryDependencies ++= Seq(
   "org.scalaz" %% "scalaz-core" % "7.0.6",
   "org.scalaz" %% "scalaz-concurrent" % "7.0.6",
-  "org.typelevel" %% "scodec-bits" % "1.0.0",
+  "org.typelevel" %% "scodec-bits" % "1.0.4",
   "org.scalaz" %% "scalaz-scalacheck-binding" % "7.0.6" % "test",
-  "org.scalacheck" %% "scalacheck" % "1.10.1" % "test"
+  "org.scalacheck" %% "scalacheck" % "1.11.6" % "test"
 )
 
 resolvers ++= Seq(
