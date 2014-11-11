@@ -1,6 +1,7 @@
 package scalaz.stream
 
 
+import Cause._
 import scalaz.{Right3, Middle3, Left3, \/-, -\/, Either3, \/}
 import scalaz.concurrent.{Actor, Strategy, Task}
 import scalaz.stream.Process._
@@ -12,13 +13,13 @@ package object nondeterminism {
 
 
   /**
-   * Non-deterministic join of streams. Streams are joined non deterministically.
-   * Whenever one of the streams terminates with other reason than `End` or `Kill`
-   * the whole join terminates with that reason and all
-   * remaining input processes are terminated with `Kill` cause as well.
+   * Nondeterministic join of streams. Up to `maxOpen` processes may be
+   * open at a time, and `maxQueued` bounds the amount of prefetching.
    *
-   * If the resulting process is killed or fails, all the merged processes terminates with `Kill` cause,
-   * in case downstream terminates normally the upstream processes are terminated with `Kill` cause as well.
+   * If any process terminates abnormally, the whole join terminates with
+   * that reason and all open processes are killed.
+   * If the resulting process is killed or fails, or if downstream terminates
+   * early, all the merged processes are killed.
    *
    * @param maxOpen     maximum simultaneous processes that concurrently merge. If eq 0 no limit.
    * @param maxQueued   maximum number of queued `A` before merged processes will back-off. If eq 0 no limit.
@@ -184,7 +185,7 @@ package object nondeterminism {
             if (allDone) S(cb(\/-(())))
             else completer = Some(cb)
           case Start => ()
-        }) 
+        })
 
       })
 

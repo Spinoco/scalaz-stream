@@ -73,9 +73,14 @@ object io {
     resource(Task.delay(os))(os => Task.delay(os.close))(
       os => Task.now((bytes: ByteVector) => Task.delay(os.write(bytes.toArray))))
 
-  /** Creates a `Sink` from a file name and optional buffer size in bytes. */
-  def fileChunkW(f: String, bufferSize: Int = 4096): Sink[Task,ByteVector] =
-    chunkW(new BufferedOutputStream(new FileOutputStream(f), bufferSize))
+  /**
+   * Creates a `Sink` from a file name and optional buffer size in bytes.
+   *
+   * @param append if true, then bytes will be written to the end of the file
+   *               rather than the beginning
+   */
+  def fileChunkW(f: String, bufferSize: Int = 4096, append: Boolean = false): Sink[Task,ByteVector] =
+    chunkW(new BufferedOutputStream(new FileOutputStream(f, append), bufferSize))
 
   /** Creates a `Channel` from a file name and optional buffer size in bytes. */
   def fileChunkR(f: String, bufferSize: Int = 4096): Channel[Task,Int,ByteVector] =
@@ -98,7 +103,7 @@ object io {
    * using the `resource` combinator to ensure the `InputStream` is closed
    * when processing the stream of lines is finished.
    */
-  def linesR(in: InputStream)(implicit codec: Codec): Process[Task,String] =
+  def linesR(in: => InputStream)(implicit codec: Codec): Process[Task,String] =
     linesR(Source.fromInputStream(in)(codec))
 
   /**
@@ -106,10 +111,10 @@ object io {
    * using the `resource` combinator to ensure the `Source` is closed
    * when processing the stream of lines is finished.
    */
-  def linesR(src: Source): Process[Task,String] =
+  def linesR(src: => Source): Process[Task,String] =
     resource(Task.delay(src))(src => Task.delay(src.close)) { src =>
       lazy val lines = src.getLines // A stateful iterator
-      Task.delay { if (lines.hasNext) lines.next else throw Terminated(End) }
+      Task.delay { if (lines.hasNext) lines.next else throw Cause.Terminated(Cause.End) }
     }
 
   /**
@@ -130,7 +135,7 @@ object io {
    * and emits lines from standard input.
    */
   def stdInLines: Process[Task,String] =
-    Process.repeatEval(Task.delay { Option(Console.readLine()).getOrElse(throw Terminated(End)) })
+    Process.repeatEval(Task.delay { Option(Console.readLine()).getOrElse(throw Cause.Terminated(Cause.End)) })
 
   /**
    * The standard output stream, as a `Sink`. This `Sink` does not
@@ -167,7 +172,7 @@ object io {
       Task.now { (buf: Array[Byte]) => Task.delay {
         val m = src.read(buf)
         if (m == buf.length) buf
-        else if (m == -1) throw Terminated(End)
+        else if (m == -1) throw Cause.Terminated(Cause.End)
         else buf.take(m)
       }}
     }

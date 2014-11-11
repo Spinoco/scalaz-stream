@@ -2,6 +2,7 @@ package scalaz.stream
 
 import org.scalacheck.Prop._
 
+import Cause._
 import scalaz._
 import scalaz.syntax.equal._
 import scalaz.std.anyVal._
@@ -133,6 +134,10 @@ object ProcessSpec extends Properties("Process") {
     Process.iterate(0)(_ + 1).take(100).toList == List.iterate(0, 100)(_ + 1)
   }
 
+  property("iterateEval") = secure {
+    Process.iterateEval(0)(i => Task.delay(i + 1)).take(100).runLog.run == List.iterate(0, 100)(_ + 1)
+  }
+
   property("kill executes cleanup") = secure {
     import TestUtil._
     val cleanup = new SyncVar[Int]
@@ -258,6 +263,11 @@ object ProcessSpec extends Properties("Process") {
     }.map(_._1).toList == List(0, 1, 1, 2, 3, 5, 8, 13)
   }
 
+  property("unfoldEval") = secure {
+    unfoldEval(10)(s => Task.now(if (s > 0) Some((s, s - 1)) else None))
+      .runLog.run.toList == List.range(10, 0, -1)
+  }
+
   property("kill of drained process terminates") = secure {
     val effect: Process[Task,Unit] = Process.repeatEval(Task.delay(())).drain
     effect.kill.runLog.timed(1000).run.isEmpty
@@ -281,6 +291,18 @@ object ProcessSpec extends Properties("Process") {
   property("pipeO stripW ~= stripW pipe") = forAll { (p1: Process1[Int,Int]) =>
     val p = logged(range(1, 11).toSource)
     p.pipeO(p1).stripW.runLog.run == p.stripW.pipe(p1).runLog.run
+  }
+
+  property("pipeW stripO ~= stripO pipe") = forAll { (p1: Process1[Int,Int]) =>
+    val p = logged(range(1, 11).toSource)
+    p.pipeW(p1).stripO.runLog.run == p.stripO.pipe(p1).runLog.run
+  }
+
+  property("process.sequence returns elements in order") = secure {
+    val random = util.Random
+    val p = Process.range(1, 10).map(i => Task.delay { Thread.sleep(random.nextInt(100)); i })
+
+    p.sequence(4).runLog.run == p.flatMap(eval).runLog.run
   }
 
   property("runAsync cleanup") = secure {

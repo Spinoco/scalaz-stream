@@ -1,5 +1,6 @@
 package scalaz.stream.async.mutable
 
+import scalaz.stream.Cause._
 import scalaz.concurrent.{Actor, Strategy, Task}
 import scalaz.stream.Process.{Cont, Halt}
 import scalaz.stream._
@@ -34,12 +35,12 @@ trait WriterTopic[W, I, O] {
    */
   def subscribeO: Process[Task, O]
 
-  /** Subscribes to `W` values only from this Writer topic **/
+  /** Subscribes to `W` values only from this Writer topic */
   def subscribeW: Process[Task, W]
 
   /**
    * Provides signal of `W` values as they were emitted by Writer1 of this Writer topic
-   **/
+   */
   def signal: scalaz.stream.async.immutable.Signal[W]
 
 
