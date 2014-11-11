@@ -3,7 +3,7 @@ organization := "spinoco"
 name := "scalaz-stream"
 
 version := (Option(System.getenv("BUILD_NUMBER")) orElse (Option(System.getProperty("BUILD_NUMBER")))).map(buildNo => {
-  "0.5.0." +  buildNo + "-SNAPSHOT"
+  "0.6.0." +  buildNo + "-SNAPSHOT"
 }).getOrElse({
   val df = new java.text.SimpleDateFormat("yyMMddHHmmss")
   "0.1.0.T" + df.format(new java.util.Date()) + "-SNAPSHOT"
