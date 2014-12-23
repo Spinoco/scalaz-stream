@@ -741,12 +741,6 @@ object Process extends ProcessInstances {
   /** The `Process` which emits the given sequence of values, then halts. */
   def emitAll[O](os: Seq[O]): Process0[O] = Emit(os)
 
-  @deprecated("Use please emitAll(h) ++ tail instead", "0.5.0")
-  def emitSeq[F[_], O](h: Seq[O], t: Process[F, O] = halt): Process[F, O] = t match {
-    case `halt` | Emit(Seq()) => emitAll(h)
-    case _ => emitAll(h) ++ t
-  }
-
   /** The `Process` which emits no values and halts immediately with the given exception. */
   def fail(rsn: Throwable): Process0[Nothing] = Halt(Error(rsn))
 
@@ -861,10 +855,6 @@ object Process extends ProcessInstances {
   def emitO[O](o: O): Process0[Nothing \/ O] =
     Process.emit(right(o))
 
-  @deprecated("Use emitAll(start until stopExclusive) instead. Produces the sequence in one chunk unlike `Process.range` which produces a lazy sequence.", "0.6.0")
-  def emitRange(start: Int, stopExclusive: Int): Process0[Int] =
-    emitAll(start until stopExclusive)
-
   /** A `Writer` which writes the given value. */
   def emitW[W](s: W): Process0[W \/ Nothing] =
     Process.emit(left(s))
@@ -973,7 +963,7 @@ object Process extends ProcessInstances {
    * The `awaken` process may be discrete.
    */
   def sleepUntil[F[_], A](awaken: Process[F, Boolean])(p: Process[F, A]): Process[F, A] =
-    awaken.dropWhile(!_).once.flatMap(b => if (b) p else halt)
+    awaken.dropWhile(!_).once.flatMap(_ => p)
 
   /**
    * A supply of `Long` values, starting with `initial`.
@@ -1085,10 +1075,8 @@ object Process extends ProcessInstances {
   //
   /////////////////////////////////////////////////////////////////////////////////////
 
-  /**
-   * Adds syntax for Channel
-   */
-  implicit class ChannelSyntax[F[_],I,O](self: Channel[F,I,O]) {
+  /** Adds syntax for `Channel`. */
+  implicit class ChannelSyntax[F[_],I,O](val self: Channel[F,I,O]) extends AnyVal {
     /** Transform the input of this `Channel`. */
     def contramap[I0](f: I0 => I): Channel[F,I0,O] =
       self.map(f andThen _)
@@ -1098,8 +1086,14 @@ object Process extends ProcessInstances {
       self.map(_ andThen F.lift(f))
   }
 
+  /** Adds syntax for `Sink`. */
+  implicit class SinkSyntax[F[_],I](val self: Sink[F,I]) extends AnyVal {
+    /** Converts `Sink` to `Channel`, that will perform the side effect and echo its input. */
+    def toChannel(implicit F: Functor[F]): Channel[F,I,I] =
+      self.map(f => (i: I) => F.map(f(i))(_ => i))
+  }
 
-  implicit class ProcessSyntax[F[_],O](val self:Process[F,O]) extends AnyVal {
+  implicit class ProcessSyntax[F[_],O](val self: Process[F,O]) extends AnyVal {
     /** Feed this `Process` through the given effectful `Channel`. */
     def through[F2[x]>:F[x],O2](f: Channel[F2,O,O2]): Process[F2,O2] =
         self.zipWith(f)((o,f) => f(o)).eval
@@ -1163,54 +1157,91 @@ object Process extends ProcessInstances {
   /**
    * This class provides infix syntax specific to `Process0`.
    */
-  implicit class Process0Syntax[O](self: Process[Env[Any,Any]#Is,O]) {
-    def toIndexedSeq: IndexedSeq[O] = {
-      @tailrec
-      def go(cur: Process[Any,O], acc: Vector[O]): IndexedSeq[O] = {
-        cur.step match {
-          case Step(Emit(os),cont) => go(cont.continue, acc fast_++ os)
-          case Step(awt,cont) => go(cont.continue,acc)
-          case Halt(End) => acc
-          case Halt(Kill) => acc
-          case Halt(Error(rsn)) => throw rsn
-        }
+  implicit class Process0Syntax[O](val self: Process0[O]) extends AnyVal {
+
+    /** Converts this `Process0` to a `Vector`. */
+    def toVector: Vector[O] =
+      self.unemit match {
+        case (_, Halt(Error(rsn))) => throw rsn
+        case (os, _) => os.toVector
       }
-      go(self, Vector())
+
+    /** Converts this `Process0` to an `IndexedSeq`. */
+    def toIndexedSeq: IndexedSeq[O] = toVector
+
+    /** Converts this `Process0` to a `List`. */
+    def toList: List[O] = toVector.toList
+
+    /** Converts this `Process0` to a `Seq`. */
+    def toSeq: Seq[O] = toVector
+
+    /** Converts this `Process0` to a `Stream`. */
+    def toStream: Stream[O] = {
+      def go(p: Process0[O]): Stream[O] =
+        p.step match {
+          case s: Step[Nothing, O] =>
+            s.head match {
+              case Emit(os) => os.toStream #::: go(s.next.continue)
+              case _ => sys.error("impossible")
+            }
+          case Halt(Error(rsn)) => throw rsn
+          case Halt(_) => Stream.empty
+        }
+      go(self)
     }
-    def toList: List[O] = toIndexedSeq.toList
-    def toSeq: Seq[O] = toIndexedSeq
-    def toMap[K, V](implicit isKV: O <:< (K, V)): Map[K, V] = toIndexedSeq.toMap(isKV)
+
+    /** Converts this `Process0` to a `Map`. */
+    def toMap[K, V](implicit isKV: O <:< (K, V)): Map[K, V] = toVector.toMap(isKV)
+
+    /** Converts this `Process0` to a `SortedMap`. */
     def toSortedMap[K, V](implicit isKV: O <:< (K, V), ord: Ordering[K]): SortedMap[K, V] =
-      SortedMap(toIndexedSeq.asInstanceOf[Seq[(K, V)]]: _*)
-    def toStream: Stream[O] = toIndexedSeq.toStream
-    def toSource: Process[Task, O] =
-      self.step match {
-      case Step(emt@Emit(os),cont)    => emt +: cont.extend(_.toSource)
-      case Step(awt, cont)            => cont.continue.toSource
-      case hlt@Halt(rsn)              => hlt
-    }
+      SortedMap(toVector.asInstanceOf[Seq[(K, V)]]: _*)
 
-  }
+    def toSource: Process[Task, O] = self
 
-  implicit class LiftIOSyntax[O](p: Process0[O]) {
-    def liftIO: Process[Task,O] = p
+    @deprecated("liftIO is deprecated in favor of toSource. It will be removed in a future release.", "0.7")
+    def liftIO: Process[Task, O] = self
   }
 
   /** Syntax for Sink, that is specialized for Task */
   implicit class SinkTaskSyntax[I](val self: Sink[Task,I]) extends AnyVal {
-    /** converts sink to channel, that will perform the side effect and echo its input */
-    def toChannel:Channel[Task,I,I] = self.map(f => (i:I) => f(i).map(_ =>i))
-
     /** converts sink to sink that first pipes received `I0` to supplied p1 */
-    def pipeIn[I0](p1: Process1[I0, I]): Sink[Task, I0] = {
+    def pipeIn[I0](p1: Process1[I0, I]): Sink[Task, I0] = Process.suspend {
       import scalaz.Scalaz._
       // Note: Function `f` from sink `self` may be used for more than 1 element emitted by `p1`.
-      @volatile var cur: Process1[I0, I] = p1
-      self.map { (f: I => Task[Unit]) =>
-        (i0: I0) =>
-          val (piped, next) = process1.feed1(i0)(cur).unemit
-          cur = next
-          piped.toList.traverse_(f)
+      @volatile var cur = p1.step
+      @volatile var lastF: Option[I => Task[Unit]] = None
+      self.takeWhile { _ =>
+        cur match {
+          case Halt(Cause.End) => false
+          case Halt(cause)     => throw new Cause.Terminated(cause)
+          case _               => true
+        }
+      } map { (f: I => Task[Unit]) =>
+        lastF = f.some
+        (i0: I0) => Task.suspend {
+          cur match {
+            case Halt(_) => sys.error("Impossible")
+            case Step(Emit(piped), cont) =>
+              cur = process1.feed1(i0) { cont.continue }.step
+              piped.toList.traverse_(f)
+            case Step(hd, cont) =>
+              val (piped, tl) = process1.feed1(i0)(hd +: cont).unemit
+              cur = tl.step
+              piped.toList.traverse_(f)
+          }
+        }
+      } onHalt {
+        case Cause.Kill =>
+          lastF map { f =>
+            cur match {
+              case Halt(_) => sys.error("Impossible (2)")
+              case s@Step(_, _) =>
+                s.toProcess.disconnect(Cause.Kill).evalMap(f).drain
+            }
+          } getOrElse Halt(Cause.Kill)
+        case Cause.End  => halt
+        case c@Cause.Error(_) => halt.causedBy(c)
       }
     }
   }
@@ -1219,15 +1250,11 @@ object Process extends ProcessInstances {
   /**
    * This class provides infix syntax specific to `Process1`.
    */
-  implicit class Process1Syntax[I,O](self: Process1[I,O]) {
+  implicit class Process1Syntax[I,O](val self: Process1[I,O]) extends AnyVal {
 
     /** Apply this `Process` to an `Iterable`. */
-    def apply(input: Iterable[I]): IndexedSeq[O] = {
-      Process(input.toSeq: _*).pipe(self.bufferAll).unemit match {
-        case (_, Halt(Error(e))) => throw e
-        case (v, _) => v.toIndexedSeq
-      }
-    }
+    def apply(input: Iterable[I]): IndexedSeq[O] =
+      Process(input.toSeq: _*).pipe(self.bufferAll).toIndexedSeq
 
     /**
      * Transform `self` to operate on the left hand side of an `\/`, passing
@@ -1386,7 +1413,7 @@ object Process extends ProcessInstances {
    * equality witnesses. This doesn't work out so well due to variance
    * issues.
    */
-  implicit class TeeSyntax[I,I2,O](self: Tee[I,I2,O]) {
+  implicit class TeeSyntax[I,I2,O](val self: Tee[I,I2,O]) extends AnyVal {
 
     /** Transform the left input to a `Tee`. */
     def contramapL[I0](f: I0 => I): Tee[I0,I2,O] =
@@ -1405,7 +1432,7 @@ object Process extends ProcessInstances {
    * with either `W` or `O`, depending on what side they
    * operate on.
    */
-  implicit class WriterSyntax[F[_],W,O](self: Writer[F,W,O]) {
+  implicit class WriterSyntax[F[_],W,O](val self: Writer[F,W,O]) extends AnyVal {
 
     /** Transform the write side of this `Writer`. */
     def flatMapW[F2[x]>:F[x],W2,O2>:O](f: W => Writer[F2,W2,O2]): Writer[F2,W2,O2] =
@@ -1480,7 +1507,7 @@ object Process extends ProcessInstances {
    * equality witnesses. This doesn't work out so well due to variance
    * issues.
    */
-  implicit class WyeSyntax[I,I2,O](self: Wye[I,I2,O]) {
+  implicit class WyeSyntax[I,I2,O](val self: Wye[I,I2,O]) extends AnyVal {
 
     /**
      * Apply a `Wye` to two `Iterable` inputs.

@@ -10,9 +10,8 @@ import scalaz.std.list._
 import scalaz.std.list.listSyntax._
 import scalaz.std.string._
 
-import org.scalacheck.{Gen, Arbitrary, Properties}
+import org.scalacheck.{Gen, Properties}
 import scalaz.concurrent.{Task, Strategy}
-import Util._
 import process1._
 import Process._
 import TestInstances._
@@ -221,7 +220,7 @@ object ProcessSpec extends Properties("Process") {
     val q = async.boundedQueue[String]()
     val sink = q.enqueue.pipeIn(process1.lift[Int,String](_.toString))
 
-    (Process.range(0,10).liftIO to sink).run.run
+    (Process.range(0,10).toSource to sink).run.run
     val res = q.dequeue.take(10).runLog.timed(3000).run.toList
     q.close.run
 
@@ -235,7 +234,7 @@ object ProcessSpec extends Properties("Process") {
     def acquire: Task[Unit] = Task.delay { written = Nil }
     def release(res: Unit): Task[Unit] = Task.now(())
     def step(res: Unit): Task[Int => Task[Unit]] = Task.now((i: Int) => Task.delay { written = written :+ i  })
-    val sink = io.resource[Unit, Int => Task[Unit]](acquire)(release)(step)
+    val sink = io.resource(acquire)(release)(step)
 
     val source = Process(1, 2, 3).toSource
 
@@ -245,6 +244,28 @@ object ProcessSpec extends Properties("Process") {
     written == List(2, 3, 4)
   }
 
+  property("pipeIn") = forAll { (p00: Process0[Int], i0: Int, p1: Process1[Int, Int]) =>
+    val p0 = emit(i0) ++ p00
+    val buffer = new collection.mutable.ListBuffer[Int]
+    p0.toSource.to(io.fillBuffer(buffer).pipeIn(p1)).run.run
+    val l = buffer.toList
+    val r = p0.pipe(p1).toList
+    s"expected: $r actual $l" |: { l === r }
+  }
+
+  property("pipeIn early termination") = forAll { (p0: Process0[Int]) =>
+    val buf1 = new collection.mutable.ListBuffer[Int]
+    val buf2 = new collection.mutable.ListBuffer[Int]
+    val buf3 = new collection.mutable.ListBuffer[Int]
+    val sink = io.fillBuffer(buf1).pipeIn(process1.take[Int](2)) ++
+               io.fillBuffer(buf2).pipeIn(process1.take[Int](2)) ++
+               io.fillBuffer(buf3).pipeIn(process1.last[Int])
+    p0.toSource.to(sink).run.run
+    val in = p0.toList
+    ("buf1" |: { buf1.toList ?= in.take(2) }) &&
+    ("buf2" |: { buf2.toList ?= in.drop(2).take(2) }) &&
+    ("buf3" |: { buf3.toList ?= in.drop(4).lastOption.toList })
+  }
 
   property("range") = secure {
     Process.range(0, 100).toList == List.range(0, 100) &&
@@ -253,7 +274,7 @@ object ProcessSpec extends Properties("Process") {
   }
 
   property("ranges") = forAll(Gen.choose(1, 101)) { size =>
-    Process.ranges(0, 100, size).liftIO.flatMap { case (i,j) => emitAll(i until j) }.runLog.run ==
+    Process.ranges(0, 100, size).toSource.flatMap { case (i,j) => emitAll(i until j) }.runLog.run ==
       IndexedSeq.range(0, 100)
   }
 
@@ -323,4 +344,23 @@ object ProcessSpec extends Properties("Process") {
 
   }
 
+  property("Process0Syntax.toStream terminates") = secure {
+    Process.constant(0).toStream.take(10).toList === List.fill(10)(0)
+  }
+
+  property("SinkSyntax.toChannel") = forAll { p0: Process0[Int] =>
+    val buffer = new collection.mutable.ListBuffer[Int]
+    val channel = io.fillBuffer(buffer).toChannel
+
+    val expected = p0.toList
+    val actual = p0.toSource.through(channel).runLog.run.toList
+    actual === expected && buffer.toList === expected
+  }
+
+  property("sleepUntil") = forAll { (p0: Process0[Int], p1: Process0[Boolean]) =>
+    val p2 = p1.take(5)
+    val expected = if (p2.exists(identity).toList.head) p0.toList else List.empty[Int]
+
+    p0.sleepUntil(p2).toList === expected
+  }
 }
