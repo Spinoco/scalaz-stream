@@ -29,7 +29,7 @@ libraryDependencies ++= Seq(
   "org.scalaz" %% "scalaz-concurrent" % "7.1.0",
   "org.typelevel" %% "scodec-bits" % "1.0.4",
   "org.scalaz" %% "scalaz-scalacheck-binding" % "7.1.0" % "test",
-  "org.scalacheck" %% "scalacheck" % "1.11.6" % "test"
+  "org.scalacheck" %% "scalacheck" % "1.12.1" % "test"
 )
 
 resolvers ++= Seq(

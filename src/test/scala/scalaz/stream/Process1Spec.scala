@@ -3,12 +3,13 @@ package scalaz.stream
 import org.scalacheck._
 import org.scalacheck.Prop._
 import scalaz.{\/-, -\/, Equal, Monoid}
-import scalaz.concurrent.Task
+import scalaz.concurrent.{Strategy, Task}
 import scalaz.std.anyVal._
 import scalaz.std.list._
 import scalaz.std.list.listSyntax._
 import scalaz.std.option._
 import scalaz.std.vector._
+import scalaz.std.tuple._
 import scalaz.std.string._
 import scalaz.syntax.equal._
 import scalaz.syntax.foldable._
@@ -19,6 +20,8 @@ import process1._
 import TestInstances._
 
 object Process1Spec extends Properties("Process1") {
+
+  implicit val ES = Strategy.DefaultTimeoutScheduler
 
   property("basic") = forAll { (pi: Process0[Int], ps: Process0[String]) =>
     val li = pi.toList
@@ -88,7 +91,7 @@ object Process1Spec extends Properties("Process1") {
         , "scan1" |: pi.scan1(_ + _).toList === li.scan(0)(_ + _).tail
         , "shiftRight" |: pi.shiftRight(1, 2).toList === List(1, 2) ++ li
         , "sliding" |: pi.sliding(j).toList.map(_.toList) === li.sliding(j).toList
-        , "splitWith" |: pi.splitWith(_ < i).toList.map(_.toList) === li.splitWith(_ < i)
+        , "splitWith" |: pi.splitWith(_ < i).toList.map(_.toList) === li.splitWith(_ < i).map(_.toList)
         , "sum" |: pi.sum.toList.headOption.getOrElse(0) === li.sum
         , "prefixSums" |: pi.prefixSums.toList === li.scan(0)(_ + _)
         , "take" |: pi.take(i).toList === li.take(i)

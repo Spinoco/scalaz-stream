@@ -5,9 +5,11 @@ import java.io.{ByteArrayOutputStream, PrintStream}
 import org.scalacheck.Prop.secure
 import org.scalacheck.Properties
 
-import scalaz.concurrent.Task
+import scalaz.concurrent.{Strategy, Task}
 
 object PrintSpec extends Properties("io.print") {
+  implicit val ES = Strategy.DefaultTimeoutScheduler
+
   property("print terminates on process close") = secure {
     terminates { out =>
       Process
