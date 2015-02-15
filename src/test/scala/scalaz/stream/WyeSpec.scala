@@ -255,10 +255,9 @@ object WyeSpec extends  Properties("Wye"){
   //tests specific case of termination with nested wyes and interrupt
   property("nested-interrupt") = secure {
     val sync = new SyncVar[Throwable \/ IndexedSeq[Unit]]
-    val term1 = async.signal[Boolean]
-    term1.set(false).run
+    val term1 = async.signalOf(false)
 
-    val p1: Process[Task,Unit] = (Process.sleep(10.hours) fby emit(true)).wye(Process.sleep(10 hours))(wye.interrupt)
+    val p1: Process[Task,Unit] = (Process.sleep(10.hours) ++ emit(true)).wye(Process.sleep(10 hours))(wye.interrupt)
     val p2:Process[Task,Unit] = repeatEval(Task.now(true)).flatMap(_ => p1)
     val toRun =  term1.discrete.wye(p2)(wye.interrupt)
 
@@ -351,5 +350,53 @@ object WyeSpec extends  Properties("Wye"){
 
   }
 
+  property("interrupt-constant.signal-halt") = secure {
+    val p1 = Process.constant(42)
+    val i1 = Process(false)
+    val v = i1.wye(p1)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
 
+  property("interrupt-constant.signal-halt.collect-all") = secure {
+    val p1 = Process.constant(42).collect { case i if i > 0 => i }
+    val i1 = Process(false)
+    val v = i1.wye(p1)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
+
+  property("interrupt-constant.signal-halt.collect-none") = secure {
+    val p1 = Process.constant(42).collect { case i if i < 0 => i }
+    val i1 = Process(false)
+    val v = i1.wye(p1)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
+
+  property("interrupt-constant.signal-halt.filter-none") = secure {
+    val p1 = Process.constant(42).filter { _ < 0 }
+    val i1 = Process(false)
+    val v = i1.wye(p1)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
+
+  property("interrupt-constant.signal-constant-true.collect-all") = secure {
+    val p1 = Process.constant(42).collect { case i if i > 0 => i }
+    val i1 = Process.constant(true)
+    val v = i1.wye(p1)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
+
+  property("interrupt-constant.signal-constant-true.collect-none") = secure {
+    val p1 = Process.constant(42).collect { case i if i < 0 => i }
+    val i1 = Process.constant(true)
+    val v = i1.wye(p1)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
+
+  property("interrupt-pipe") = secure {
+    val p1 = Process.constant(42).collect { case i if i < 0 => i }
+    val p2 = p1 |> process1.id
+    val i1 = Process(false)
+    val v = i1.wye(p2)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
 }

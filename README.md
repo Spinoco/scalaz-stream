@@ -1,7 +1,8 @@
 scalaz-stream
 =============
 
-[![Build Status](https://travis-ci.org/scalaz/scalaz-stream.png?branch=master)](http://travis-ci.org/scalaz/scalaz-stream)
+[![Build Status](https://travis-ci.org/scalaz/scalaz-stream.svg?branch=master)](http://travis-ci.org/scalaz/scalaz-stream)
+[![Gitter Chat](https://badges.gitter.im/scalaz/scalaz-stream.svg)](https://gitter.im/scalaz/scalaz-stream)
 
 ### Where to get it ###
 
@@ -56,8 +57,6 @@ The library supports a number of other interesting use cases:
 There are examples (with commentary) in the test directory [`scalaz.stream.examples`](https://github.com/scalaz/scalaz-stream/tree/master/src/test/scala/scalaz/stream/examples). Also see [the wiki](https://github.com/scalaz/scalaz-stream/wiki) for more documentation. If you use `scalaz.stream`, you're strongly encouraged to submit additional examples and add to the wiki!
 
 For questions about the library, use the [scalaz mailing list](https://groups.google.com/forum/#!forum/scalaz) or the [scalaz-stream tag on StackOverflow](http://stackoverflow.com/questions/tagged/scalaz-stream).
-
-The API documentation of the latest release is available on [docs.typelevel.org](http://docs.typelevel.org/api/scalaz-stream/stable/latest/doc/).
 
 Blog posts and other external resources are listed on the [Additional Resources](https://github.com/scalaz/scalaz-stream/wiki/Additional-Resources) page.
 

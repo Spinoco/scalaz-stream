@@ -36,7 +36,7 @@ package object nondeterminism {
 
     suspend {
       val q = async.boundedQueue[A](maxQueued)(S)
-      val done = async.signal[Boolean](S)
+      val done = async.signalOf(false)(S)
 
       //keep state of master source
       var state: Either3[Cause, EarlyCause => Unit,  Cont[Task,Process[Task,A]]] =
@@ -84,9 +84,9 @@ package object nondeterminism {
         }
       }
 
-      // initially sets signal and starts the source evaluation
+      // starts the source evaluation
       def start: Task[Unit] =
-        done.set(false).map { _ => actor ! Start }
+        Task delay { actor ! Start }
 
       def sourceDone = state.leftOr(false)(_=>true)
 
@@ -113,10 +113,11 @@ package object nondeterminism {
 
             //runs the process with a chance to interrupt it using signal `done`
             //interrupt is done via killing the done signal.
+            //enqueue action needs to be interruptible, otherwise the process will never halt
+            //if the outer process is terminated while the queue is full and an enqueue is pending
             //note that here we convert `Kill` to exception to distinguish form normal and
             //killed behaviour of upstream termination
-            done.discrete.wye(p)(wye.interrupt)
-            .to(q.enqueue)
+            done.discrete.wye(p.flatMap(a => eval_(q.enqueueOne(a))))(wye.interrupt)
             .onHalt{
               case Kill => Halt(Error(Terminated(Kill)))
               case cause => Halt(cause)
@@ -187,7 +188,7 @@ package object nondeterminism {
       })
 
 
-      (eval_(start) fby q.dequeue)
+      (eval_(start) ++ q.dequeue)
       .onComplete(eval_(Task.async[Unit] { cb => actor ! FinishedDown(cb) }))
     }
 

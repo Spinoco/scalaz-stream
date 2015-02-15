@@ -108,6 +108,7 @@ object MergeNSpec extends Properties("mergeN") {
     val count = 100
     val eachSize = 10
 
+    // TODO replace with signalOf; what follows is immensely confusing and tricky...
     val sizeSig = async.signal[Int]
 
     def incrementOpen =
@@ -126,8 +127,8 @@ object MergeNSpec extends Properties("mergeN") {
 
     val ps =
       emitAll(for (i <- 0 until count) yield {
-        eval_(incrementOpen) fby
-          Process.range(0,eachSize).flatMap(i=> emit(i) fby sleep5) onComplete
+        eval_(incrementOpen) ++
+          Process.range(0,eachSize).flatMap(i=> emit(i) ++ sleep5) onComplete
           eval_(decrementDone)
       }).toSource
 
@@ -166,6 +167,15 @@ object MergeNSpec extends Properties("mergeN") {
       .runLog.timed(3000).run
 
     r.size == 2
+  }
+
+  // tests that mergeN does not deadlock when the producer is waiting for enqueue to complete
+  // this is really testing `njoin`
+  property("bounded-mergeN-halts-onFull") = secure {
+    merge.mergeN(1)(emit(constant(())))
+	.once
+	.run.timed(3000).run
+	true
   }
 
   property("kill mergeN") = secure {
