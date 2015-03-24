@@ -7,6 +7,7 @@ import org.scalacheck.Prop._
 import scalaz.concurrent.{Strategy, Task}
 import scalaz.stream.Process._
 import scalaz.stream.ReceiveY.{HaltR, HaltL, ReceiveR, ReceiveL}
+import scalaz.syntax.monad._
 import scalaz.{\/, -\/, \/-}
 import scala.concurrent.duration._
 import scala.concurrent.SyncVar
@@ -137,14 +138,14 @@ object WyeSpec extends  Properties("Wye"){
 
 
   property("either.continue-when-left-done") = secure {
-    val e = (Process.range(0, 20) either (awakeEvery(25 millis).take(20))).runLog.timed(5000).run
+    val e = (Process.range(0, 20) either (time.awakeEvery(25 millis).take(20))).runLog.timed(5000).run
     ("Both sides were emitted" |: (e.size == 40))  &&
       ("Left side terminated earlier" |: e.zipWithIndex.filter(_._1.isLeft).lastOption.exists(_._2 < 35))   &&
       ("Right side was last" |:  e.zipWithIndex.filter(_._1.isRight).lastOption.exists(_._2 == 39))
   }
 
   property("either.continue-when-right-done") = secure {
-    val e = ((awakeEvery(25 millis).take(20)) either Process.range(0, 20)).runLog.timed(5000).run
+    val e = ((time.awakeEvery(25 millis).take(20)) either Process.range(0, 20)).runLog.timed(5000).run
     ("Both sides were emitted" |: (e.size == 40)) &&
       ("Right side terminated earlier" |: e.zipWithIndex.filter(_._1.isRight).lastOption.exists(_._2 < 35))   &&
       ("Left side was last" |: e.zipWithIndex.filter(_._1.isLeft).lastOption.exists(_._2 == 39))
@@ -177,8 +178,8 @@ object WyeSpec extends  Properties("Wye"){
     val syncO = new SyncVar[Int]
 
     // Left process terminates earlier.
-    val l = Process.awakeEvery(10 millis) onComplete eval_(Task.delay{ Thread.sleep(500);syncL.put(100)})
-    val r = Process.awakeEvery(10 millis) onComplete eval_(Task.delay{ Thread.sleep(600);syncR.put(200)})
+    val l = time.awakeEvery(10 millis) onComplete eval_(Task.delay{ Thread.sleep(500);syncL.put(100)})
+    val r = time.awakeEvery(10 millis) onComplete eval_(Task.delay{ Thread.sleep(600);syncR.put(200)})
 
     val e = ((l either r).take(10) onComplete eval_(Task.delay(syncO.put(1000)))).runLog.timed(3000).run
 
@@ -244,7 +245,7 @@ object WyeSpec extends  Properties("Wye"){
   //tests that wye correctly terminates drained process
   property("merge-drain-halt") = secure {
 
-    val effect:Process[Task,Int] = Process.repeatEval(Task.delay(())).drain
+    val effect:Process[Task,Int] = Process.repeatEval(Task delay { () }).drain
 
     val pm1 = effect.wye(Process(1000,2000).toSource)(wye.merge).take(2)
     val pm2 = Process(3000,4000).toSource.wye(effect)(wye.merge).take(2)
@@ -252,12 +253,26 @@ object WyeSpec extends  Properties("Wye"){
     (pm1 ++ pm2).runLog.timed(3000).run.size == 4
   }
 
+  property("mergeHaltBoth.terminate-on-doubleHalt") = secure {
+    implicit val scheduler = DefaultScheduler
+
+    for (i <- 1 to 100) {
+      val q = async.unboundedQueue[Unit]
+      q.enqueueOne(()).run
+
+      val process = ((q.dequeue merge halt).once wye halt)(wye.mergeHaltBoth)
+      process.run.timed(3000).run
+    }
+
+    true
+  }
+
   //tests specific case of termination with nested wyes and interrupt
   property("nested-interrupt") = secure {
     val sync = new SyncVar[Throwable \/ IndexedSeq[Unit]]
     val term1 = async.signalOf(false)
 
-    val p1: Process[Task,Unit] = (Process.sleep(10.hours) ++ emit(true)).wye(Process.sleep(10 hours))(wye.interrupt)
+    val p1: Process[Task,Unit] = (time.sleep(10.hours) ++ emit(true)).wye(time.sleep(10 hours))(wye.interrupt)
     val p2:Process[Task,Unit] = repeatEval(Task.now(true)).flatMap(_ => p1)
     val toRun =  term1.discrete.wye(p2)(wye.interrupt)
 
@@ -398,5 +413,97 @@ object WyeSpec extends  Properties("Wye"){
     val i1 = Process(false)
     val v = i1.wye(p2)(wye.interrupt).runLog.timed(3000).run.toList
     v.size >= 0
+  }
+
+  property("interrupt-pipe with wye.merge") = secure {
+    val p1 = Process.constant(42).collect { case i if i < 0 => i } merge Process.constant(12)
+    val p2 = p1 |> process1.id
+    val i1 = Process(false)
+    val v = i1.wye(p2)(wye.interrupt).runLog.timed(3000).run.toList
+    v.size >= 0
+  }
+
+  property("outer cleanup through pipe gets called with interrupted task") = secure {
+    @volatile
+    var complete = false
+
+    @volatile
+    var cleanup = false
+
+    @volatile
+    var flagReceived = false
+
+    val flag = new SyncVar[Unit]
+
+    val awaitP = await(Task delay {
+      flag.put(())
+      Thread.sleep(3000)
+      complete = true
+    })(emit)
+
+    eval(Task delay { flagReceived = flag.get(500).isDefined; true }).wye(
+        awaitP pipe process1.id onComplete eval_(Task delay { cleanup = true })
+      )(wye.interrupt).run.run
+
+    complete :| "task completed" && cleanup :| "inner cleanup invoked" && flagReceived :| "received flag"
+  }
+
+  property("outer cleanup through pipe gets called with preempted task") = secure {
+    @volatile
+    var complete = false
+
+    @volatile
+    var cleanup = false
+
+    val flag = new SyncVar[Unit]
+
+    val awaitP = await((Task delay { flag.get; Thread.sleep(500) }) >> (Task delay {
+        Thread.sleep(3000)
+        complete = true
+      }))(emit)
+
+    // interrupt awaitP before the second part of the task can even start running
+    eval(Task delay { flag.put(()); true }).wye(
+        awaitP pipe process1.id onComplete eval_(Task.delay { cleanup = true })
+      )(wye.interrupt).run.run
+
+    !complete :| "task interrupted" && cleanup :| "inner cleanup invoked"
+  }
+
+  property("outer cleanup through pipe gets called before interrupted inner") = secure {
+    import scala.collection.immutable.Queue
+    import process1.id
+
+    @volatile
+    var complete = false
+
+    @volatile
+    var innerCleanup = false
+
+    @volatile
+    var outerCleanup = false
+
+    @volatile
+    var deadlocked = false
+
+    val flag = new SyncVar[Unit]
+
+    val task1 = Task fork (Task delay { deadlocked = flag.get(10000).isEmpty; Thread.sleep(1000); complete = true })
+    // val task1 = Task { deadlocked = flag.get(2000).isEmpty; Thread.sleep(1000); complete = true }
+
+    val awaitP =  await(task1)(u =>Process.emit(u))
+
+
+    eval(Task delay { true })
+      .wye(
+          awaitP pipe process1.id onComplete eval_(Task delay { flag.put(()); innerCleanup = true })
+        )(wye.interrupt)
+      .onComplete(eval_(Task delay { outerCleanup = true }))
+      .run.run
+
+    complete :| "completion" &&
+      innerCleanup :| "innerCleanup" &&
+      outerCleanup :| "outerCleanup"
+      !deadlocked :| "avoided deadlock"
   }
 }

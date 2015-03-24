@@ -27,7 +27,7 @@ scalacOptions ++= Seq(
 libraryDependencies ++= Seq(
   "org.scalaz" %% "scalaz-core" % "7.1.0",
   "org.scalaz" %% "scalaz-concurrent" % "7.1.0",
-  "org.typelevel" %% "scodec-bits" % "1.0.4",
+  "org.typelevel" %% "scodec-bits" % "1.0.6",
   "org.scalaz" %% "scalaz-scalacheck-binding" % "7.1.0" % "test",
   "org.scalacheck" %% "scalacheck" % "1.12.1" % "test"
 )

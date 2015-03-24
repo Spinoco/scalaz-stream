@@ -1,16 +1,21 @@
 package scalaz.stream
 
+import java.util.concurrent.atomic.AtomicReference
+
 import Cause._
-import java.util.concurrent.ScheduledExecutorService
+
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+
 import scala.annotation.tailrec
-import scala.annotation.unchecked.uncheckedVariance
 import scala.collection.SortedMap
 import scala.concurrent.duration._
 import scalaz.{\/-, Catchable, Functor, Monad, Monoid, Nondeterminism, \/, -\/, ~>}
 import scalaz.\/._
-import scalaz.concurrent.{Actor, Strategy, Task}
+import scalaz.concurrent.{Actor, Future, Strategy, Task}
 import scalaz.stream.process1.Await1
+import scalaz.syntax.monad._
 
+import scala.annotation.unchecked.uncheckedVariance
 
 /**
  * An effectful stream of `O` values. In between emitting values
@@ -63,7 +68,6 @@ sealed trait Process[+F[_], +O]
   /** Alias for `append` */
   final def fby[F2[x] >: F[x], O2 >: O](p2: => Process[F2, O2]): Process[F2, O2] = append(p2)
 
-
   /**
    * Run one step of an incremental traversal of this `Process`.
    * This function is mostly intended for internal use. As it allows
@@ -71,32 +75,27 @@ sealed trait Process[+F[_], +O]
    * users are responsible for ensuring resource safety.
    */
   final def step: HaltOrStep[F, O] = {
+    val empty: Emit[Nothing] = Emit(Nil)
     @tailrec
     def go(cur: Process[F,O], stack: Vector[Cause => Trampoline[Process[F,O]]], cnt: Int) : HaltOrStep[F,O] = {
       if (stack.nonEmpty) cur match {
-        case Halt(End) if cnt <= 0 => Step(empty,Cont(stack))
-        case Halt(cause) => go(Try(stack.head(cause).run), stack.tail, cnt -1)
+        case Halt(End) if cnt <= 0  => Step(empty,Cont(stack))
+        case Halt(cause) => go(Try(stack.head(cause).run), stack.tail, cnt - 1)
         case Emit(os) if os.isEmpty => Step(empty,Cont(stack))
         case emt@(Emit(os)) => Step(emt,Cont(stack))
         case awt@Await(_,_) => Step(awt,Cont(stack))
-        case Append(h,st) => go(h, st fast_++ stack, cnt -1)
+        case Append(h,st) => go(h, st fast_++ stack, cnt - 1)
       } else cur match {
         case hlt@Halt(cause) => hlt
         case emt@Emit(os) if os.isEmpty => halt0
         case emt@Emit(os) => Step(emt,Cont(Vector.empty))
         case awt@Await(_,_) => Step(awt,Cont(Vector.empty))
-        case Append(h,st) => go(h,st, cnt -1)
+        case Append(h,st) => go(h,st, cnt - 1)
       }
     }
-    // at max stay 10 cycles in step, then consult outer process
-    // this gives chance to higher level combinator that may
-    // interrupt during the process execution to interrupt evaluation of
-    // the process every each 10 cycles.
-    go(this,Vector.empty, 10)
+    go(this,Vector.empty, 10)   // *any* value >= 1 works here. higher values improve throughput but reduce concurrency and fairness. 10 is a totally wild guess
 
   }
-
-
 
   /**
    * `p.suspendStep` propagates exceptions to `p`.
@@ -114,7 +113,7 @@ sealed trait Process[+F[_], +O]
   final def onHalt[F2[x] >: F[x], O2 >: O](f: Cause => Process[F2, O2]): Process[F2, O2] = {
      val next = (t: Cause) => Trampoline.delay(Try(f(t)))
      this match {
-       case append: Append[F2, O2]  => Append(append.head, append.stack :+ next)
+       case (append: Append[F2, O2] @unchecked) => Append(append.head, append.stack :+ next)
        case emt@Emit(_)      => Append(emt, Vector(next))
        case awt@Await(_, _)  => Append(awt, Vector(next))
        case hlt@Halt(rsn)    => Append(hlt, Vector(next))
@@ -304,7 +303,7 @@ sealed trait Process[+F[_], +O]
    * Skip the first part of the process and pretend that it ended with `early`.
    * The first part is the first `Halt` or the first `Emit` or request from the first `Await`.
    */
-  private[stream] final def injectCause(early: EarlyCause): Process[F, O] = this match {
+  private[stream] final def injectCause(early: EarlyCause): Process[F, O] = (this match {
     // Note: We cannot use `step` in the implementation since we want to inject `early` as soon as possible.
     // Eg. Let `q` be `halt ++ halt ++ ... ++ p`. `step` reduces `q` to `p` so if `injectCause` was implemented
     // by `step` then `q.injectCause` would be same as `p.injectCause`. But in our current implementation
@@ -316,7 +315,7 @@ sealed trait Process[+F[_], +O]
     case Append(Halt(rsn), stack) => Append(Halt(rsn.causedBy(early)), stack)
     case Append(Emit(_), stack) => Append(Halt(early), stack)
     case Append(Await(_, rcv), stack) => Try(rcv(left(early)).run) +: Cont(stack)
-  }
+  })
 
   /**
    * Causes this process to be terminated immediately with `Kill` cause,
@@ -650,7 +649,7 @@ object Process extends ProcessInstances {
   /**
    * Continuation of the process. Represents process _stack_. Used in conjunction with `Step`.
    */
-  case class Cont[+F[_], +O](stack: Vector[Cause => Trampoline[Process[F, O]]] @uncheckedVariance )  {
+  case class Cont[+F[_], +O](stack: Vector[Cause => Trampoline[Process[F, O]]] @uncheckedVariance) {
 
     /**
      * Prepends supplied process to this stack
@@ -724,6 +723,10 @@ object Process extends ProcessInstances {
   def await1[I]: Process1[I, I] =
     receive1(emit)
 
+  /** `Writer` based version of `await1`. */
+  def await1W[A]: Writer1[Nothing, A, A] =
+    writer.liftO(Process.await1[A])
+
   /** Like `await1`, but consults `fb` when await fails to receive an `I` */
   def await1Or[I](fb: => Process1[I, I]): Process1[I, I] =
     receive1Or(fb)(emit)
@@ -732,107 +735,25 @@ object Process extends ProcessInstances {
   def awaitBoth[I, I2]: Wye[I, I2, ReceiveY[I, I2]] =
     await(Both[I, I2])(emit)
 
+  /** `Writer` based version of `awaitBoth`. */
+  def awaitBothW[I, I2]: WyeW[Nothing, I, I2, ReceiveY[I, I2]] =
+    writer.liftO(Process.awaitBoth[I, I2])
+
   /** The `Tee` which requests from the left branch, emits this value, then halts. */
   def awaitL[I]: Tee[I, Any, I] =
     await(L[I])(emit)
+
+  /** `Writer` based version of `awaitL`. */
+  def awaitLW[I]: TeeW[Nothing, I, Any, I] =
+    writer.liftO(Process.awaitL[I])
 
   /** The `Tee` which requests from the right branch, emits this value, then halts. */
   def awaitR[I2]: Tee[Any, I2, I2] =
     await(R[I2])(emit)
 
-  /** The `Process` which emits the single value given, then halts. */
-  def emit[O](o: O): Process0[O] = Emit(Vector(o))
-
-  /** The `Process` which emits the given sequence of values, then halts. */
-  def emitAll[O](os: Seq[O]): Process0[O] = Emit(os)
-
-  /** The `Process` which emits no values and halts immediately with the given exception. */
-  def fail(rsn: Throwable): Process0[Nothing] = Halt(Error(rsn))
-
-  /** `halt` but with precise type. */
-  private[stream] val halt0: Halt = Halt(End)
-
-  /** The `Process` which emits no values and signals normal termination. */
-  val halt: Process0[Nothing] = halt0
-
-  /** Empty emit. Used to signal end of evaluation form `step` to give chance step to be interrupted */
-  val empty: Emit[Nothing] = Emit(Nil)
-
-  /**
-   * The `Process1` which awaits a single input and passes it to `rcv` to
-   * determine the next state.
-   */
-  def receive1[I, O](rcv: I => Process1[I, O]): Process1[I, O] =
-    await(Get[I])(rcv)
-
-  /** Like `receive1`, but consults `fb` when it fails to receive an input. */
-  def receive1Or[I, O](fb: => Process1[I, O])(rcv: I => Process1[I, O]): Process1[I, O] =
-    awaitOr(Get[I])((rsn: EarlyCause) => fb.causedBy(rsn))(rcv)
-
-  ///////////////////////////////////////////////////////////////////////////////////////
-  //
-  // CONSTRUCTORS -> Helpers
-  //
-  //////////////////////////////////////////////////////////////////////////////////////
-
-  /** `Writer` based version of `await1`. */
-  def await1W[A]: Writer1[Nothing, A, A] =
-    liftW(Process.await1[A])
-
-  /** `Writer` based version of `awaitL`. */
-  def awaitLW[I]: TeeW[Nothing, I, Any, I] =
-    liftW(Process.awaitL[I])
-
   /** `Writer` based version of `awaitR`. */
   def awaitRW[I2]: TeeW[Nothing, Any, I2, I2] =
-    liftW(Process.awaitR[I2])
-
-  /** `Writer` based version of `awaitBoth`. */
-  def awaitBothW[I, I2]: WyeW[Nothing, I, I2, ReceiveY[I, I2]] =
-    liftW(Process.awaitBoth[I, I2])
-
-  /**
-   * Discrete process that every `d` emits elapsed duration
-   * since the start time of stream consumption.
-   *
-   * For example: `awakeEvery(5 seconds)` will
-   * return (approximately) `5s, 10s, 20s`, and will lie dormant
-   * between emitted values.
-   *
-   * By default, this uses a shared `ScheduledExecutorService`
-   * for the timed events, and runs the consumer using the `pool` `Strategy`,
-   * to allow for the process to decide whether result shall be run on
-   * different thread pool, or with `Strategy.Sequential` on the
-   * same thread pool as the scheduler.
-   *
-   * @param d           Duration between emits of the resulting process
-   * @param S           Strategy to run the process
-   * @param scheduler   Scheduler used to schedule tasks
-   */
-  def awakeEvery(d: Duration)(
-    implicit S: Strategy,
-    scheduler: ScheduledExecutorService): Process[Task, Duration] = {
-    def metronomeAndSignal:(()=>Unit,async.mutable.Signal[Duration]) = {
-      val t0 = Duration(System.nanoTime, NANOSECONDS)
-      val signal = async.toSignal[Duration](Process.halt)(S)
-
-      val metronome = scheduler.scheduleAtFixedRate(
-        new Runnable { def run = {
-          val d = Duration(System.nanoTime, NANOSECONDS) - t0
-          signal.set(d).run
-        }},
-        d.toNanos,
-        d.toNanos,
-        NANOSECONDS
-      )
-      (()=>metronome.cancel(false), signal)
-    }
-
-    await(Task.delay(metronomeAndSignal))({
-      case (cm, signal) =>  signal.discrete onComplete eval_(signal.close.map(_=>cm()))
-    })
-  }
-
+    writer.liftO(Process.awaitR[I2])
 
   /**
    * The infinite `Process`, always emits `a`.
@@ -846,39 +767,22 @@ object Process extends ProcessInstances {
     go
   }
 
-  /**
-   * A continuous stream of the elapsed time, computed using `System.nanoTime`.
-   * Note that the actual granularity of these elapsed times depends on the OS, for instance
-   * the OS may only update the current time every ten milliseconds or so.
-   */
-  def duration: Process[Task, FiniteDuration] =
-    eval(Task.delay(System.nanoTime)).flatMap { t0 =>
-      repeatEval(Task.delay(FiniteDuration(System.nanoTime - t0, NANOSECONDS)))
-    }
+  /** The `Process` which emits the single value given, then halts. */
+  def emit[O](o: O): Process0[O] = Emit(Vector(o))
+
+  /** The `Process` which emits the given sequence of values, then halts. */
+  def emitAll[O](os: Seq[O]): Process0[O] = Emit(os)
 
   /** A `Writer` which emits one value to the output. */
   def emitO[O](o: O): Process0[Nothing \/ O] =
-    Process.emit(right(o))
+    emit(right(o))
 
   /** A `Writer` which writes the given value. */
   def emitW[W](s: W): Process0[W \/ Nothing] =
-    Process.emit(left(s))
+    emit(left(s))
 
-  /**
-   * A 'continuous' stream which is true after `d, 2d, 3d...` elapsed duration,
-   * and false otherwise.
-   * If you'd like a 'discrete' stream that will actually block until `d` has elapsed,
-   * use `awakeEvery` instead.
-   */
-  def every(d: Duration): Process[Task, Boolean] = {
-    def go(lastSpikeNanos: Long): Process[Task, Boolean] =
-      suspend {
-        val now = System.nanoTime
-        if ((now - lastSpikeNanos) > d.toNanos) emit(true) ++ go(now)
-        else emit(false) ++ go(lastSpikeNanos)
-      }
-    go(0)
-  }
+  /** The `Process` which emits no values and halts immediately with the given exception. */
+  def fail(rsn: Throwable): Process0[Nothing] = Halt(Error(rsn))
 
   /** A `Process` which emits `n` repetitions of `a`. */
   def fill[A](n: Int)(a: A, chunkSize: Int = 1): Process0[A] = {
@@ -898,6 +802,15 @@ object Process extends ProcessInstances {
   def forwardFill[A](p: Process[Task, A])(implicit S: Strategy): Process[Task, A] =
     async.toSignal(p).continuous
 
+  /** `halt` but with precise type. */
+  private[stream] val halt0: Halt = Halt(End)
+
+  /** The `Process` which emits no values and signals normal termination. */
+  val halt: Process0[Nothing] = halt0
+
+  /** Alias for `halt`. */
+  def empty[F[_],O]: Process[F, O] = halt
+
   /**
    * An infinite `Process` that repeatedly applies a given function
    * to a start value. `start` is the first value emitted, followed
@@ -912,17 +825,6 @@ object Process extends ProcessInstances {
    */
   def iterateEval[F[_], A](start: A)(f: A => F[A]): Process[F, A] =
     emit(start) ++ await(f(start))(iterateEval(_)(f))
-
-  /** Promote a `Process` to a `Writer` that writes nothing. */
-  def liftW[F[_], A](p: Process[F, A]): Writer[F, Nothing, A] =
-    p.map(right)
-
-  /**
-   * Promote a `Process` to a `Writer` that writes and outputs
-   * all values of `p`.
-   */
-  def logged[F[_], A](p: Process[F, A]): Writer[F, A, A] =
-    p.flatMap(a => emitAll(Vector(left(a), right(a))))
 
   /** Lazily produce the range `[start, stopExclusive)`. If you want to produce the sequence in one chunk, instead of lazily, use `emitAll(start until stopExclusive)`.  */
   def range(start: Int, stopExclusive: Int, by: Int = 1): Process0[Int] =
@@ -951,17 +853,15 @@ object Process extends ProcessInstances {
   }
 
   /**
-   * A single-element `Process` that waits for the duration `d`
-   * before emitting its value. This uses a shared
-   * `ScheduledThreadPoolExecutor` to signal duration and
-   * avoid blocking on thread. After the signal,
-   * the execution continues with `S` strategy
+   * The `Process1` which awaits a single input and passes it to `rcv` to
+   * determine the next state.
    */
-  def sleep(d: FiniteDuration)(
-    implicit S: Strategy
-    , schedulerPool: ScheduledExecutorService
-    ): Process[Task, Nothing] =
-    awakeEvery(d).once.drain
+  def receive1[I, O](rcv: I => Process1[I, O]): Process1[I, O] =
+    await(Get[I])(rcv)
+
+  /** Like `receive1`, but consults `fb` when it fails to receive an input. */
+  def receive1Or[I, O](fb: => Process1[I, O])(rcv: I => Process1[I, O]): Process1[I, O] =
+    awaitOr(Get[I])((rsn: EarlyCause) => fb.causedBy(rsn))(rcv)
 
   /**
    * Delay running `p` until `awaken` becomes true for the first time.
@@ -984,36 +884,6 @@ object Process extends ProcessInstances {
   /** A `Writer` which writes the given value; alias for `emitW`. */
   def tell[S](s: S): Process0[S \/ Nothing] =
     emitW(s)
-
-  /**
-   * Convert a `Process` to a `Task` which can be run repeatedly to generate
-   * the elements of the `Process`.
-   *
-   * Note that evaluation of this task will end with Exception `End` or `Continue`
-   * even when the evaluation of the process was successful.
-   */
-  def toTask[A](p: Process[Task, A]): Task[A] = {
-      var cur = p
-      def go: Task[A] =
-        cur.step match {
-          case Step(Emit(os), cont) =>
-            if (os.isEmpty) {
-              cur = cont.continue
-              go
-            } else {
-              cur = emitAll(os.tail) +: cont
-              Task.now(os.head)
-            }
-          case Step(Await(rq,rcv), cont) =>
-            rq.attempt.flatMap { r =>
-              cur = Try(rcv(EarlyCause.fromTaskResult(r)).run) +: cont ; go
-            }
-          case Halt(End) => Task.fail(Terminated(End))
-          case Halt(Kill) => Task.fail(Terminated(Kill))
-          case Halt(Error(rsn)) => Task.fail(rsn)
-        }
-      Task.delay(go).flatMap(a => a)
-  }
 
   /** Produce a (potentially infinite) source from an unfold. */
   def unfold[S, A](s0: S)(f: S => Option[(A, S)]): Process0[A] = {
@@ -1251,6 +1121,46 @@ object Process extends ProcessInstances {
     }
   }
 
+  implicit class WriterTaskSyntax[W, O](val self: Writer[Task, W, O]) extends AnyVal {
+
+    /**
+     * Returns result of channel evaluation on `O` side tupled with
+     * original output value passed to channel.
+     */
+    def observeOThrough[O2](ch: Channel[Task, O, O2]): Writer[Task, W, (O, O2)] = {
+      val observerCh = ch map { f =>
+        in: (W \/ O) => in.fold(w => Task.now(-\/(w)), o => f(o).map(o2 => \/-(o -> o2)))
+      }
+      self through observerCh
+    }
+
+    /** Returns result of channel evaluation on `W` side tupled with
+     * original write value passed to channel.
+     */
+    def observeWThrough[W2](ch: Channel[Task, W, W2]): Writer[Task, (W, W2), O] = {
+      val observerCh = ch map { f =>
+        in: (W \/ O) => in.fold(w => f(w).map(w2 => -\/(w -> w2)), o => Task.now(\/-(o)))
+      }
+      self through observerCh
+    }
+
+    /** Feed this `Writer`'s output through the provided effectful `Channel`. */
+    def throughO[O2](ch: Channel[Task, O, O2]): Writer[Task, W, O2] = {
+      val ch2 = ch map { f =>
+        in: (W \/ O) => in.fold(w => Task.now(left(w)), o => f(o).map(right))
+      }
+      self through ch2
+    }
+
+    /** Feed this `Writer`'s writes through the provided effectful `Channel`. */
+    def throughW[W2](ch: Channel[Task, W, W2]): Writer[Task, W2, O] = {
+      val ch2 = ch map { f =>
+        in: (W \/ O) => in.fold(w => f(w).map(left), o => Task.now(right(o)))
+      }
+      self through ch2
+    }
+  }
+
 
   /**
    * This class provides infix syntax specific to `Process1`.
@@ -1301,11 +1211,19 @@ object Process extends ProcessInstances {
     def forwardFill(implicit S: Strategy): Process[Task, O] =
       async.toSignal(self).continuous
 
-    /** Infix syntax for `Process.toTask`. */
-    def toTask: Task[O] = Process.toTask(self)
+    /**
+     * Returns result of channel evaluation tupled with
+     * original value passed to channel.
+     **/
+    def observeThrough[O2](ch: Channel[Task, O, O2]): Process[Task, (O, O2)] = {
+      val observerCh = ch map { f =>
+        o: O => f(o) map { o2 => o -> o2 }
+      }
+      self through observerCh
+    }
 
     /**
-     * Asynchronous execution of this Process. Note that this method is not resource safe unless
+     * Asynchronous stepping of this Process. Note that this method is not resource safe unless
      * callback is called with _left_ side completed. In that case it is guaranteed that all cleanups
      * has been successfully completed.
      * User of this method is responsible for any cleanup actions to be performed by running the
@@ -1319,113 +1237,271 @@ object Process extends ProcessInstances {
      * There is chance, that cleanup code of intermediate `Await` will get called twice on interrupt, but
      * always at least once. The second cleanup invocation in that case may run on different thread, asynchronously.
      *
+     * Please note that this method is *not* intended for external use!  It is the `Await` analogue of `step`, which
+     * is also an internal-use function.
      *
-     * @param cb  result of the asynchronous evaluation of the process.
-     *            Callback on right side will never be called if evaluation of the process resulted in `empty`
-     * @param S  Strategy to use when evaluating the process. Note that `Strategy.Sequential` will cause SOE.
+     * @param cb  result of the asynchronous evaluation of the process. Note that, the callback is never called
+     *            on the right side, if the sequence is empty.
+     * @param S  Strategy to use when evaluating the process. Note that `Strategy.Sequential` may cause SOE.
      * @return   Function to interrupt the evaluation
      */
-    protected[stream] final def runAsync(
-      cb: Cause \/ (Seq[O], Cont[Task,O]) => Unit
-      )(implicit S: Strategy): (EarlyCause) => Unit = {
+    protected[stream] final def stepAsync(cb: Cause \/ (Seq[O], Cont[Task,O]) => Unit)(implicit S: Strategy): EarlyCause => Unit = {
+      val allSteps = Task delay {
+        /*
+         * Represents the running state of the computation.  If we're running, then the interrupt
+         * function *for our current step* will be on the left.  If we have been interrupted, then
+         * the cause for that interrupt will be on the right.  These state transitions are made
+         * atomically, such that it is *impossible* for a task to be running, never interrupted and
+         * to have this value be a right.  If the value is a right, then either no task is running
+         * or the running task has received an interrupt.
+         */
+        val interrupted = new AtomicReference[(() => Unit) \/ EarlyCause](-\/({ () => () }))
 
-          sealed trait M
-          case class AsyncStep(cur: Process[Task,O]) extends M
-          case class AwaitDone(res: Throwable \/ Any, awt: Await[Task, Any, O], next:Cont[Task,O]) extends M
-          case class Interrupt(cause: EarlyCause) extends M
+        /*
+         * Produces the evaluation for a single step.  Generally, this function will be
+         * invoked only once and return immediately.  In the case of an `Await`, we must
+         * descend recursively into the resultant child.  Generally speaking, the recursion
+         * should be extremely shallow, since it is uncommon to have a chain of nested
+         * awaits of any significant length (usually they are punctuated by an `Emit`).
+         */
+        def go(p: Process[Task, O]): Task[EarlyCause => Unit] = Task delay {
+          p.step match {
+            case Halt(cause) =>
+              (Task delay { S { cb(-\/(cause)) } }) >> (Task now { _: EarlyCause => () })
 
-          // forward referenced actor
-          var a: Actor[M] = null
+            case Step(Emit(os), cont) =>
+              (Task delay { S { cb(\/-((os, cont))) } }) >> (Task now { _: EarlyCause => () })
 
-          // If the execution has been interrupted this is set to EarlyCause (Kill)
-          // Otherwise this is set to reason of termination of the evaluation,
-          // That means End when execution terminated normally and `EarlyCause` in case of failure.
-          var completed: Option[Cause] = None
+            case Step(awt: Await[Task, a, O], cont) => {
+              val Await(req, rcv) = awt
 
-          // When there is open await this is set to cleanup that shall be run
-          // hence task may get interrupted, and may not complete before/after interruption
-          // we run the cleanup code here.
-          // Otherwise when evaluating AsyncStep, this is set to None.
-          var cleanup: Option[(EarlyCause => Process[Task,O])] = None
+              case class PreStepAbort(c: EarlyCause) extends RuntimeException
 
-          def active(m:M): Unit = m match {
-            case AsyncStep(cur) =>
-              cur.step match {
-                case Step(Emit(os),next) =>
-                  if (os.isEmpty) {
-                    // we are ok there to run indefinitely the evaluation of next value
-                    // hence the evaluation may be interrupted. That way we may never enter into infinite loop
-                    // as a side effect a process that will never emit (i.e. Process.drain) is guaranteed to
-                    // run without synchronizing on some other combinator (like wye, mergeN).
-                    a ! AsyncStep(next.continue)
-                  } else {
-                    completed = Some(End)
-                    S(cb(right((os,next))))
+              def unpack(msg: Option[Throwable \/ a]): Option[Process[Task, O]] = msg map { r => Try(rcv(EarlyCause fromTaskResult r).run) }
+
+              // throws an exception if we're already interrupted (caught in preStep check)
+              def checkInterrupt(int: => (() => Unit)): Task[Unit] = Task delay {
+                interrupted.get() match {
+                  case ptr @ -\/(int2) => {
+                    if (interrupted.compareAndSet(ptr, -\/(int)))
+                      Task now (())
+                    else
+                      checkInterrupt(int)
                   }
 
+                  case \/-(c) => Task fail PreStepAbort(c)
+                }
+              } join
 
-                case Step(awt@Await(req,rcv),next) =>
-                  cleanup = Some((c:EarlyCause) => Try(rcv(left(c)).run) +: next)
-                  req.runAsync(r => a ! AwaitDone(r, awt, next))
+              Task delay {
+                // will be true when we have "committed" to either a mid-step OR exceptional/completed
+                val barrier = new AtomicBoolean(false)
 
-                case Halt(cause) =>
-                  completed = Some(cause)
-                  S(cb(left(cause)))
-              }
+                // detects what completion/interrupt case we're in and factors out race conditions
+                def handle(
+                    // interrupted before the task started running; task never ran!
+                    preStep: EarlyCause => Unit,
+                    // interrupted *during* the task run; task is probably still running
+                    midStep: EarlyCause => Unit,
+                    // task finished running, but we were *previously* interrupted
+                    postStep: (Process[Task, O], EarlyCause) => Unit,
+                    // task finished with an error, but was not interrupted
+                    exceptional: Throwable => Unit,
+                    // task finished with a value, no errors, no interrupts
+                    completed: Process[Task, O] => Unit)(result: Option[Throwable \/ a]): Unit = result match {
 
-            case AwaitDone(r, awt, next) =>
-              cleanup = None //reset await state
-              a ! AsyncStep(Try(awt.rcv(EarlyCause.fromTaskResult(r)).run) +: next)
+                  // interrupted via the `Task.fail` defined in `checkInterrupt`
+                  case Some(-\/(PreStepAbort(cause: EarlyCause))) => preStep(cause)
 
-            case Interrupt(cause) =>
-              completed = Some(cause)
-              cleanup match {
-                case Some(cf) =>
-                  // `AsyncStep` is not active, instead we await for Await result.
-                  // hence that may or may not be received, we run cleanup here and complete
-                  // AsyncStep will not get evaluated any more because we switch to `interrupted` handler
-                  // and in that interrupted handler only await will be evaluated
-                  cleanup = None
-                  Try(cf(cause)).run.runAsync {
-                    case -\/(rsn) => S(cb(left(Error(rsn).causedBy(cause))))
-                    case \/-(_) =>  S(cb(left(cause)))
+                  case result => {
+                    val inter = interrupted.get().toOption
+
+                    assert(!inter.isEmpty || result.isDefined)
+
+                    // interrupted via the callback mechanism, checked in `completeInterruptibly`
+                    // always matches to a `None` (we don't have a value yet)
+                    inter filter { _ => !result.isDefined } match {
+                      case Some(cause) => {
+                        if (barrier.compareAndSet(false, true)) {
+                          midStep(cause)
+                        } else {
+                          // task already completed *successfully*, pretend we weren't interrupted at all
+                          // our *next* step (which is already running) will get a pre-step interrupt
+                          ()
+                        }
+                      }
+
+                      case None => {
+                        // completed the task, `interrupted.get()` is defined, and so we were interrupted post-completion
+                        // always matches to a `Some` (we always have value)
+                        val pc = for {
+                          cause <- inter
+                          continuation <- unpack(result)
+                        } yield postStep(continuation, cause)
+
+                        pc match {
+                          case Some(back) => back
+
+                          case None => {
+                            if (barrier.compareAndSet(false, true)) {
+                              result match {
+                                // nominally completed the task, but with an exception
+                                case Some(-\/(t)) => exceptional(t)
+
+                                case result => {
+                                  // completed the task, no interrupts, no exceptions, good to go!
+                                  unpack(result) match {
+                                    case Some(head) => completed(head +: cont)
+
+                                    case None => ???      // didn't match any condition; fail! (probably a double-None bug in completeInterruptibly)
+                                  }
+                                }
+                              }
+                            } else {
+                              result match {
+                                case Some(_) =>
+                                  // we detected mid-step interrupt; this needs to transmute to post-step; loop back to the top!
+                                  handle(preStep = preStep, midStep = midStep, postStep = postStep, exceptional = exceptional, completed = completed)(result)
+
+                                case None => ???        // wtf?! (apparently we were called twice with None; bug in completeInterruptibly)
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
+                }
 
-                case None =>
-                  // this indicates we have got in middle of evaluating `AsyncStep`.
-                  // this is no-op hence `AsyncStep` will evaluate in next cycle
-                  ()
+                /*
+                 * Start the task. per the `completeInterruptibly` invariants, the callback will be invoked exactly once
+                 * unless interrupted in the final computation step, in which case it will be invoked twice: once with
+                 * the interrupt signal and once with the final computed result (this case is detected by the `PostStep`)
+                 * extractor.  Under all other circumstances, including interrupts, exceptions and natural completion, the
+                 * callback will be invoked exactly once.
+                 */
+                lazy val interrupt: () => Unit = completeInterruptibly((checkInterrupt(interrupt) >> req).get)(handle(
+                  preStep = { cause =>
+                    // interrupted; now drain
+                    (Try(rcv(-\/(cause)).run) +: cont).drain.run runAsync {
+                      case -\/(t) => S { cb(-\/(Error(t) causedBy cause)) }
+                      case \/-(_) => S { cb(-\/(cause)) }
+                    }
+                  },
+
+                  midStep = { cause =>
+                    // interrupted; now drain
+                    (Try(rcv(-\/(cause)).run) +: cont).drain.run runAsync {
+                      case -\/(t) => S { cb(-\/(Error(t) causedBy cause)) }
+                      case \/-(_) => S { cb(-\/(cause)) }
+                    }
+                  },
+
+                  postStep = { (inner, cause) =>
+                    inner.kill.run runAsync { _ => () }
+                  },
+
+                  exceptional = { t =>
+                    // we got an exception (not an interrupt!) and we need to drain everything
+                    go(Try(rcv(-\/(Error(t))).run) +: cont) runAsync { _ => () }
+                  },
+
+                  completed = { continuation =>
+                    go(continuation) runAsync { _ => () }
+                  }
+                ))
+
+                interrupt     // please don't delete this!  highly mutable code within
+
+                // interrupts the current step (may be a recursive child!) and sets `interrupted`
+                def referencedInterrupt(cause: EarlyCause): Unit = {
+                  interrupted.get() match {
+                    case ptr @ -\/(int) => {
+                      if (interrupted.compareAndSet(ptr, \/-(cause))) {
+                        int()
+                      } else {
+                        referencedInterrupt(cause)
+                      }
+                    }
+
+                    case \/-(_) => ()    // interrupted a second (or more) time; discard later causes and keep the first one
+                  }
+                }
+
+                referencedInterrupt _
               }
+            }
           }
+        } join
 
-          def interrupted(cause:Cause, m: M) : Unit = m match {
-            case AsyncStep(cur) =>
-              // this indicates we have been interrupted during evaluation of the AsyncStep.
-              // We have to clean process here and then continue with callback
-              cur.kill.run.runAsync { _ => S(cb(left(cause))) }
+        go _
+      }
 
-            case AwaitDone(r, awt, _) =>
-              // indicates we have been interrupted during evaluation of await, and that await has completed
-              // at this point original process continues, but hence we may allocate resources in that await (req)
-              // we must run cleanup of the process here as well. Note that this may cause cleanups to be run twice
-              cleanup = None
-              Try(awt.rcv(EarlyCause.fromTaskResult(r)).run)
-              .kill
-              .run.runAsync(_ => ())
+      allSteps flatMap { _(self) } run   // hey, we could totally return something sane here! what up?
+    }
 
-            case Interrupt(_) =>
-              //interrupted after we already completed, no-op
-              ()
+    /**
+     * Analogous to Future#listenInterruptibly, but guarantees listener notification provided that the
+     * body of any given computation step does not block indefinitely.  When the interrupt function is
+     * invoked, the callback will be immediately invoked, either with an available completion value or
+     * with None.  If the current step of the task ultimately completes with its *final* value (i.e.
+     * the final step of the task is an Async and it starts before the interrupt and completes *afterwards*),
+     * that value will be passed to the callback as a second return.  Thus, the callback will always be
+     * invoked at least once, and may be invoked twice.  If it is invoked twice, the first callback
+     * will always be None while the second will be Some.
+     *
+     *
+     */
+    private def completeInterruptibly[A](f: Future[A])(cb: Option[A] => Unit)(implicit S: Strategy): () => Unit = {
+      import Future._
+
+      val cancel = new AtomicBoolean(false)
+
+      // `cb` is run exactly once or twice
+      // Case A) `cb` is run with `None` followed by `Some` if we were cancelled but still obtained a value.
+      // Case B) `cb` is run with just `Some` if it's never cancelled.
+      // Case C) `cb` is run with just `None` if it's cancelled before a value is even attempted.
+      // Case D) the same as case A, but in the opposite order, only in very rare cases
+      lazy val actor: Actor[Option[Future[A]]] = new Actor[Option[Future[A]]]({
+        // pure cases
+        case Some(Suspend(thunk)) if !cancel.get() =>
+          actor ! Some(thunk())
+
+        case Some(BindSuspend(thunk, g)) if !cancel.get() =>
+          actor ! Some(thunk() flatMap g)
+
+        case Some(Now(a)) => S { cb(Some(a)) }
+
+        case Some(Async(onFinish)) if !cancel.get() => {
+          onFinish { a =>
+            Trampoline delay { S { cb(Some(a)) } }
           }
-
-          a = new Actor[M]({ m =>
-            completed.fold(active(m))(interrupted(_,m))
-          })(S)
-
-          S(a ! AsyncStep(self)) //fork to run the first evaluation so we won't block
-          (cause: EarlyCause) =>  {  a ! Interrupt(cause)}
         }
 
+        case Some(BindAsync(onFinish, g)) if !cancel.get() => {
+          onFinish { a =>
+            if (!cancel.get()) {
+              Trampoline delay { g(a) } map { r => actor ! Some(r) }
+            } else {
+              // here we drop `a` on the floor
+              Trampoline done { () }  // `cb` already run with `None`
+            }
+          }
+        }
+
+        // fallthrough case where cancel.get() == true
+        case Some(_) => ()  // `cb` already run with `None`
+
+        case None => {
+          cancel.set(true)  // the only place where `cancel` is set to `true`
+          S { cb(None) }
+        }
+      })
+
+      S { actor ! Some(f) }
+
+      { () => actor ! None }
+    }
   }
 
   /**
@@ -1455,21 +1531,42 @@ object Process extends ProcessInstances {
    */
   implicit class WriterSyntax[F[_],W,O](val self: Writer[F,W,O]) extends AnyVal {
 
+    /**
+     * Observe the output side of this Writer` using the
+     * given `Sink`, then discard it. Also see `observeW`.
+     */
+    def drainO(snk: Sink[F,O]): Process[F,W] =
+      observeO(snk).stripO
+
+    /**
+     * Observe the write side of this `Writer` using the
+     * given `Sink`, then discard it. Also see `observeW`.
+     */
+    def drainW(snk: Sink[F,W]): Process[F,O] =
+      observeW(snk).stripW
+
+    def flatMapO[F2[x]>:F[x],W2>:W,B](f: O => Writer[F2,W2,B]): Writer[F2,W2,B] =
+      self.flatMap(_.fold(emitW, f))
+
     /** Transform the write side of this `Writer`. */
     def flatMapW[F2[x]>:F[x],W2,O2>:O](f: W => Writer[F2,W2,O2]): Writer[F2,W2,O2] =
       self.flatMap(_.fold(f, emitO))
 
-    /** Remove the write side of this `Writer`. */
-    def stripW: Process[F,O] =
-      self.flatMap(_.fold(_ => halt, emit))
+    /** Map over the output side of this `Writer`. */
+    def mapO[B](f: O => B): Writer[F,W,B] =
+      self.map(_.map(f))
 
     /** Map over the write side of this `Writer`. */
     def mapW[W2](f: W => W2): Writer[F,W2,O] =
       self.map(_.leftMap(f))
 
-    /** pipe Write side of this `Writer`  */
-    def pipeW[B](f: Process1[W,B]): Writer[F,B,O] =
-      self.pipe(process1.liftL(f))
+    /**
+     * Observe the output side of this `Writer` using the
+     * given `Sink`, keeping it available for subsequent
+     * processing. Also see `drainO`.
+     */
+    def observeO(snk: Sink[F,O]): Writer[F,W,O] =
+      self.map(_.swap).observeW(snk).map(_.swap)
 
     /**
      * Observe the write side of this `Writer` using the
@@ -1484,41 +1581,21 @@ object Process extends ProcessInstances {
         )
       ).flatMap(identity)
 
-    /**
-     * Observe the write side of this `Writer` using the
-     * given `Sink`, then discard it. Also see `observeW`.
-     */
-    def drainW(snk: Sink[F,W]): Process[F,O] =
-      observeW(snk).stripW
+    /** Pipe output side of this `Writer`  */
+    def pipeO[B](f: Process1[O,B]): Writer[F,W,B] =
+      self.pipe(process1.liftR(f))
 
+    /** Pipe write side of this `Writer`  */
+    def pipeW[B](f: Process1[W,B]): Writer[F,B,O] =
+      self.pipe(process1.liftL(f))
 
-    /**
-     * Observe the output side of this `Writer` using the
-     * given `Sink`, keeping it available for subsequent
-     * processing. Also see `drainO`.
-     */
-    def observeO(snk: Sink[F,O]): Writer[F,W,O] =
-      self.map(_.swap).observeW(snk).map(_.swap)
-
-    /**
-     * Observe the output side of this Writer` using the
-     * given `Sink`, then discard it. Also see `observeW`.
-     */
-    def drainO(snk: Sink[F,O]): Process[F,W] =
-      observeO(snk).stripO
-
-    /** Map over the output side of this `Writer`. */
-    def mapO[B](f: O => B): Writer[F,W,B] =
-      self.map(_.map(f))
-
-    def flatMapO[F2[x]>:F[x],W2>:W,B](f: O => Writer[F2,W2,B]): Writer[F2,W2,B] =
-      self.flatMap(_.fold(emitW, f))
-
+    /** Remove the output side of this `Writer`. */
     def stripO: Process[F,W] =
       self.flatMap(_.fold(emit, _ => halt))
 
-    def pipeO[B](f: Process1[O,B]): Writer[F,W,B] =
-      self.pipe(process1.liftR(f))
+    /** Remove the write side of this `Writer`. */
+    def stripW: Process[F,O] =
+      self.flatMap(_.fold(_ => halt, emit))
   }
 
 

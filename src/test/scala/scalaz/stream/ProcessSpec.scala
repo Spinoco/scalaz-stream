@@ -15,8 +15,9 @@ import scalaz.concurrent.{Task, Strategy}
 import process1._
 import Process._
 import TestInstances._
-import scala.concurrent.duration._
 import scala.concurrent.SyncVar
+
+import java.util.concurrent.atomic.AtomicInteger
 
 object ProcessSpec extends Properties("Process") {
 
@@ -61,66 +62,12 @@ object ProcessSpec extends Properties("Process") {
 
   }
 
-
-
-
-
-  property("awakeEvery") = secure {
-    Process.awakeEvery(100 millis).map(_.toMillis/100).take(5).runLog.run == Vector(1,2,3,4,5)
-  }
-
-
   property("sinked") = secure {
     val p1 = Process.constant(1).toSource
     val pch = Process.constant((i:Int) => Task.now(())).take(3)
 
     p1.to(pch).runLog.run.size == 3
   }
-
-  property("duration") = secure {
-    val firstValueDiscrepancy = duration.once.runLast
-    val reasonableErrorInMillis = 200
-    val reasonableErrorInNanos = reasonableErrorInMillis * 1000000
-    def p = firstValueDiscrepancy.run.get.toNanos < reasonableErrorInNanos
-
-    val r1 = p :| "first duration is near zero on first run"
-    Thread.sleep(reasonableErrorInMillis)
-    val r2 = p :| "first duration is near zero on second run"
-
-    r1 && r2
-  }
-
-  import scala.concurrent.duration._
-  val smallDelay = Gen.choose(10, 300) map {_.millis}
-
-
-  property("every") =
-    forAll(smallDelay) { delay: Duration =>
-      type BD = (Boolean, Duration)
-      val durationSinceLastTrue: Process1[BD, BD] = {
-        def go(lastTrue: Duration): Process1[BD,BD] = {
-          await1 flatMap { pair:(Boolean, Duration) => pair match {
-            case (true , d) => emit((true , d - lastTrue)) ++ go(d)
-            case (false, d) => emit((false, d - lastTrue)) ++ go(lastTrue)
-          } }
-        }
-        go(0.seconds)
-      }
-
-      val draws = (600.millis / delay) min 10 // don't take forever
-
-      val durationsSinceSpike = every(delay).
-                                tee(duration)(tee zipWith {(a,b) => (a,b)}).
-                                take(draws.toInt) |>
-        durationSinceLastTrue
-
-      val result = durationsSinceSpike.runLog.run.toList
-      val (head :: tail) = result
-
-      head._1 :| "every always emits true first" &&
-        tail.filter   (_._1).map(_._2).forall { _ >= delay } :| "true means the delay has passed" &&
-        tail.filterNot(_._1).map(_._2).forall { _ <= delay } :| "false means the delay has not passed"
-    }
 
   property("fill") = forAll(Gen.choose(0,30) flatMap (i => Gen.choose(0,50) map ((i,_)))) {
     case (n,chunkSize) =>
@@ -129,8 +76,8 @@ object ProcessSpec extends Properties("Process") {
 
   property("forwardFill") = secure {
     import scala.concurrent.duration._
-    val t2 = Process.awakeEvery(2 seconds).forwardFill.zip {
-      Process.awakeEvery(100 milliseconds).take(100)
+    val t2 = time.awakeEvery(2 seconds).forwardFill.zip {
+      time.awakeEvery(100 milliseconds).take(100)
     }.run.timed(15000).run
     true
   }
@@ -223,7 +170,7 @@ object ProcessSpec extends Properties("Process") {
   }
 
   property("pipeIn") = secure {
-    val q = async.boundedQueue[String]()
+    val q = async.unboundedQueue[String]
     val sink = q.enqueue.pipeIn(process1.lift[Int,String](_.toString))
 
     (Process.range(0,10).toSource to sink).run.run
@@ -316,12 +263,12 @@ object ProcessSpec extends Properties("Process") {
   }
 
   property("pipeO stripW ~= stripW pipe") = forAll { (p1: Process1[Int,Int]) =>
-    val p = logged(range(1, 11).toSource)
+    val p = writer.logged(range(1, 11).toSource)
     p.pipeO(p1).stripW.runLog.run == p.stripW.pipe(p1).runLog.run
   }
 
   property("pipeW stripO ~= stripO pipe") = forAll { (p1: Process1[Int,Int]) =>
-    val p = logged(range(1, 11).toSource)
+    val p = writer.logged(range(1, 11).toSource)
     p.pipeW(p1).stripO.runLog.run == p.stripO.pipe(p1).runLog.run
   }
 
@@ -332,22 +279,46 @@ object ProcessSpec extends Properties("Process") {
     p.sequence(4).runLog.run == p.flatMap(eval).runLog.run
   }
 
-  property("runAsync cleanup") = secure {
-
-    val q = async.boundedQueue[Int]()
-    val q2 = async.boundedQueue[Int]()
+  property("stepAsync onComplete on task never completing") = secure {
+    val q = async.unboundedQueue[Int]
 
     @volatile var cleanupCalled = false
     val sync = new SyncVar[Cause \/ (Seq[Int], Process.Cont[Task,Int])]
-    val deque = q.dequeue.onComplete(eval_(Task.delay{cleanupCalled = true}))
-    val interrupt =
-      (deque observe q2.enqueue).runAsync(sync.put)
+    val p = q.dequeue onComplete eval_(Task delay { cleanupCalled = true })
+
+    val interrupt = p stepAsync sync.put
 
     Thread.sleep(100)
     interrupt(Kill)
 
-    sync.get(3000).isDefined && cleanupCalled
+    sync.get(3000).isDefined :| "sync completion" && cleanupCalled :| "cleanup"
+  }
 
+  property("stepAsync independent onComplete exactly once on task eventually completing") = secure {
+    val inner = new AtomicInteger(0)
+    val outer = new AtomicInteger(0)
+
+    val signal = new SyncVar[Unit]
+    val result = new SyncVar[Cause \/ (Seq[Int], Process.Cont[Task, Int])]
+
+    val task = Task delay {
+      signal.put(())
+      Thread.sleep(100)
+    }
+
+    val p = await(task) { _ =>
+      emit(42) onComplete (Process eval_ (Task delay { inner.incrementAndGet() }))
+    } onComplete (Process eval_ (Task delay { outer.incrementAndGet() }))
+
+    val interrupt = p stepAsync result.put
+    signal.get
+    interrupt(Kill)
+
+    Thread.sleep(200)     // ensure the task actually completes
+
+    (result.get(3000).get == -\/(Kill)) :| "computation result" &&
+      (inner.get() == 1) :| s"inner finalizer invocation count ${inner.get()}" &&
+      (outer.get() == 1) :| s"outer finalizer invocation count ${outer.get()}"
   }
 
   property("Process0Syntax.toStream terminates") = secure {

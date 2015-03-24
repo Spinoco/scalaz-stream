@@ -32,12 +32,17 @@ object MergeNSpec extends Properties("mergeN") {
 
   }
 
+  property("complete-with-inner-finalizer") = secure {
+    merge.mergeN(emit(halt) onComplete eval_(Task now (()))).runLog timed 3000 run
+
+    true
+  }
+
 
   // tests that when downstream terminates,
   // all cleanup code is called on upstreams
   property("source-cleanup-down-done") = secure {
-
-    val cleanupQ = async.boundedQueue[Int]()
+    val cleanupQ = async.unboundedQueue[Int]
     val cleanups = new SyncVar[Throwable \/ IndexedSeq[Int]]
 
     val ps =
@@ -49,6 +54,7 @@ object MergeNSpec extends Properties("mergeN") {
 
     // this makes sure we see at least one value from sources
     // and therefore we won`t terminate downstream to early.
+
     merge.mergeN(ps).scan(Set[Int]())({
       case (sum, next) => sum + next
     }).takeWhile(_.size < 10).runLog.timed(3000).run
@@ -64,13 +70,13 @@ object MergeNSpec extends Properties("mergeN") {
   // unlike source-cleanup-down-done it focuses on situations where upstreams are in async state,
   // and thus will block until interrupted.
   property("source-cleanup-async-down-done") = secure {
-    val cleanupQ = async.boundedQueue[Int]()
+    val cleanupQ = async.unboundedQueue[Int]
     val cleanups = new SyncVar[Throwable \/ IndexedSeq[Int]]
     cleanupQ.dequeue.take(11).runLog.runAsync(cleanups.put)
 
 
     //this below is due the non-thread-safety of scala object, we must memoize this here
-    val delayEach10 =  Process.awakeEvery(10 seconds)
+    val delayEach10 = time.awakeEvery(10 seconds)
 
     def oneUp(index:Int) =
       (emit(index).toSource ++ delayEach10.map(_=>index))
@@ -123,7 +129,7 @@ object MergeNSpec extends Properties("mergeN") {
         case None => Some(0)
       })
 
-    val sleep5 = sleep(5 millis)
+    val sleep5 = time.sleep(5 millis)
 
     val ps =
       emitAll(for (i <- 0 until count) yield {
@@ -181,5 +187,18 @@ object MergeNSpec extends Properties("mergeN") {
   property("kill mergeN") = secure {
     merge.mergeN(Process(Process.repeatEval(Task.now(1)))).kill.run.timed(3000).run
     true // Test terminates.
+  }
+
+  property("complete all children before onComplete") = secure {
+    val count = new AtomicInteger(0)
+    val inc = Process eval (Task delay { count.incrementAndGet() })
+    val size = 10
+
+    val p = merge.mergeN(Process emitAll (0 until size map { _ => inc })).drain onComplete (Process eval (Task delay { count.get() }))
+
+    val result = p.runLog timed 3000 run
+
+    (result.length == 1) :| s"result.length == ${result.length}" &&
+      (result.head == size) :| s"result.head == ${result.head}"
   }
 }

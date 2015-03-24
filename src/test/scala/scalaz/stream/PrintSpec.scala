@@ -1,14 +1,15 @@
 package scalaz.stream
 
 import java.io.{ByteArrayOutputStream, PrintStream}
+import java.util.concurrent.ScheduledExecutorService
 
 import org.scalacheck.Prop.secure
 import org.scalacheck.Properties
 
-import scalaz.concurrent.{Strategy, Task}
+import scalaz.concurrent.Task
 
 object PrintSpec extends Properties("io.print") {
-  implicit val ES = Strategy.DefaultTimeoutScheduler
+  implicit val S: ScheduledExecutorService = DefaultScheduler
 
   property("print terminates on process close") = secure {
     terminates { out =>

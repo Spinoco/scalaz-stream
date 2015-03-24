@@ -43,30 +43,6 @@ object wye {
   }
 
   /**
-   * A `Wye` which echoes the right branch while draining the left,
-   * taking care to make sure that the left branch is never more
-   * than `maxUnacknowledged` behind the right. For example:
-   * `src.connect(snk)(observe(10))` will output the same thing
-   * as `src`, but will as a side effect direct output to `snk`,
-   * blocking on `snk` if more than 10 elements have enqueued
-   * without a response.
-   */
-  def drainL[I](maxUnacknowledged: Int): Wye[Any,I,I] =
-    yipWithL[Any,I,I](maxUnacknowledged)((_,i) => i) ++ tee.passR
-
-  /**
-   * A `Wye` which echoes the left branch while draining the right,
-   * taking care to make sure that the right branch is never more
-   * than `maxUnacknowledged` behind the left. For example:
-   * `src.connect(snk)(observe(10))` will output the same thing
-   * as `src`, but will as a side effect direct output to `snk`,
-   * blocking on `snk` if more than 10 elements have enqueued
-   * without a response.
-   */
-  def drainR[I](maxUnacknowledged: Int): Wye[I,Any,I] =
-    yipWithL[I,Any,I](maxUnacknowledged)((i,i2) => i) ++ tee.passL
-
-  /**
    * Invokes `dynamic` with `I == I2`, and produces a single `I` output. Output is
    * left-biased: if a `These(i1,i2)` is emitted, this is translated to an
    * `emitSeq(List(i1,i2))`.
@@ -655,6 +631,8 @@ object wye {
       //cb to be completed for `out` side
       var out: Option[(Cause \/ Seq[O])  => Unit] = None
 
+      var downDone= false
+
       //forward referenced actor
       var a: Actor[M] = null
 
@@ -664,7 +642,7 @@ object wye {
       // states of both sides
       // todo: resolve when we will get initially "kill"
       def initial[A](p:Process[Task,A]) : Cont[Task,A] = {
-        val next: Cause => Trampoline[Process[Task, A]]  = (c:Cause) => c match {
+        val next: Cause => Trampoline[Process[Task, A]] = (c:Cause) => c match {
           case End => Trampoline.done(p)
           case e: EarlyCause => Trampoline.done(p.kill)
         }
@@ -679,7 +657,7 @@ object wye {
       def runSide[A](side: Env[L, R]#Y[A])(state: SideState[A]): SideState[A] = state match {
         case Left3(rsn)         => a ! Ready[A](side, -\/(rsn)); state //just safety callback
         case Middle3(interrupt) => state //no-op already awaiting the result  //todo: don't wee nedd a calback there as well.
-        case Right3(cont)       => Either3.middle3(cont.continue.runAsync { res => a ! Ready[A](side, res) })
+        case Right3(cont)       => Either3.middle3(cont.continue stepAsync { res => a ! Ready[A](side, res) })
       }
 
       val runSideLeft = runSide(Left) _
@@ -696,7 +674,7 @@ object wye {
             Either3.middle3((_: Cause) => ()) //rest the interrupt so it won't get interrupted again
 
           case Right3(cont) =>
-            (Halt(Kill) +: cont).runAsync(_ => a ! Ready[A](side, -\/(Kill)))
+            (Halt(Kill) +: cont) stepAsync { _ => a ! Ready[A](side, -\/(Kill)) }
             Either3.middle3((_: Cause) => ()) // no-op cleanup can't be interrupted
 
           case left@Left3(_) =>
@@ -732,9 +710,6 @@ object wye {
           case None      => None
         }
       }
-
-
-
 
       // Consumes any output form either side and updates wye with it.
       // note it signals if the other side has to be killed
@@ -816,7 +791,6 @@ object wye {
       }
 
 
-
       a = Actor[M]({ m =>
         m match {
           case Ready(side, result) =>
@@ -839,10 +813,24 @@ object wye {
 
           case DownDone(cb0) =>
             if (!yy.isHalt) {
-              val cb1 = Some((r: Cause \/ Seq[O]) => cb0(\/-(())))
-              val (y,cb) = runY(disconnectL(Kill)(disconnectR(Kill)(yy)).kill, cb1)
-              yy = y
-              out = haltIfDone(yy, left, right, cb)
+              val cb1 = (r: Cause \/ Seq[O]) => cb0(\/-(()))
+              if (!downDone) {
+                // complete old callback (from `Get` if defined)
+                out.foreach(cb => S(cb(-\/(Kill))))
+                val (y,cb) = runY(disconnectL(Kill)(disconnectR(Kill)(yy)).kill, Some(cb1))
+                yy = y
+                out = cb
+                downDone = true
+              }
+              else {
+                // important that existing callback is NOT erased. doing so can cause process to hang on terminate
+                // first terminate is on interrupt, second when an awaited task completes
+                out = out match {
+                  case Some(cb) => Some{(r: Cause \/ Seq[O]) => cb(r); cb0(\/-(()))}
+                  case None => Some(cb1) // should never happen - if no cb, yy will be halt
+                }
+              }
+              out = haltIfDone(yy, left, right, out)
             }
             else S(cb0(\/-(())))
         }

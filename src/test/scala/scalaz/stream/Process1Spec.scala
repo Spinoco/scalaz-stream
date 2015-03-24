@@ -2,9 +2,8 @@ package scalaz.stream
 
 import org.scalacheck._
 import org.scalacheck.Prop._
-import scalaz.{\/-, -\/, Equal, Monoid}
-import scalaz.concurrent.{Strategy, Task}
-import scalaz.scalacheck.ScalazProperties._
+import scalaz.{\/-, -\/, Monoid}
+import scalaz.concurrent.Task
 import scalaz.std.anyVal._
 import scalaz.std.list._
 import scalaz.std.list.listSyntax._
@@ -21,8 +20,6 @@ import process1._
 import TestInstances._
 
 object Process1Spec extends Properties("Process1") {
-
-  implicit val ES = Strategy.DefaultTimeoutScheduler
 
   property("basic") = forAll { (pi: Process0[Int], ps: Process0[String]) =>
     val li = pi.toList
@@ -64,7 +61,13 @@ object Process1Spec extends Properties("Process1") {
         , "intersperse" |: pi.intersperse(i).toList === li.intersperse(i)
         , "last" |: pi.last.toList.headOption === li.lastOption
         , "lastOr" |: pi.lastOr(i).toList.head === li.lastOption.getOrElse(i)
-        , "liftL"  |:  {
+        , "liftFirst"  |:  {
+            val lifted = process1.liftFirst[Int,Int,Int](b => Some(b))(process1.id[Int].map(i => i + 1) onComplete emit(Int.MinValue))
+            pi.map(i => (i, i + 1)).pipe(lifted).toList == li.map(i => (i + 1, i + 1)) :+ ((Int.MinValue, Int.MinValue))
+        }, "liftSecond"  |:  {
+            val lifted = process1.liftSecond[Int,Int,Int](b => Some(b))(process1.id[Int].map(i => i + 1) onComplete emit(Int.MinValue))
+            pi.map(i => (i + 1, i)).pipe(lifted).toList == li.map(i => (i + 1, i + 1)) :+ ((Int.MinValue, Int.MinValue))
+        }, "liftL"  |:  {
             val lifted = process1.liftL[Int,Int,Nothing](process1.id[Int].map( i=> i + 1) onComplete emit(Int.MinValue))
             pi.map(-\/(_)).pipe(lifted).toList == li.map(i => -\/(i + 1)) :+ -\/(Int.MinValue)
         }
@@ -214,22 +217,5 @@ object Process1Spec extends Properties("Process1") {
     range(0, 0).zipWithPreviousAndNext.toList.isEmpty &&
     range(0, 1).zipWithPreviousAndNext.toList === List((None, 0, None)) &&
     range(0, 3).zipWithPreviousAndNext.toList === List((None, 0, Some(1)), (Some(0), 1, Some(2)), (Some(1), 2, None))
-  }
-
-  property("category.laws") = secure {
-    // passes on master-a, but fails on master with the same error as
-    // "contravariant.laws"
-
-    //category.laws[Process1]
-    true
-  }
-
-  property("contravariant.laws") = secure {
-    // passes on master-a, but fails on master with:
-    // [info] ! Process1.contravariant.laws: Exception raised on property evaluation.
-    // [info] > Exception: java.lang.NoClassDefFoundError: org/scalacheck/Pretty$
-
-    //contravariant.laws[({ type λ[α] = Process1[α, Int] })#λ]
-    true
   }
 }

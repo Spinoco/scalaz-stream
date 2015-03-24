@@ -2,9 +2,14 @@ package scalaz.stream
 
 import java.io._
 
-import scala.io.{Codec, Source}
+import scalaz.{-\/, \/-}
 import scalaz.concurrent.Task
+
 import scodec.bits.ByteVector
+
+import scala.annotation.tailrec
+import scala.io.{Codec, Source}
+
 import Process._
 
 /**
@@ -43,10 +48,6 @@ object io {
         }
     }
   }
-
-  /** Promote an effectful function to a `Channel`. */
-  def channel[F[_],A,B](f: A => F[B]): Channel[F, A, B] =
-    Process.constant(f)
 
   /**
    * Creates a `Channel[Task,Int,ByteVector]` from an `InputStream` by
@@ -88,7 +89,7 @@ object io {
 
   /** A `Sink` which, as a side effect, adds elements to the given `Buffer`. */
   def fillBuffer[A](buf: collection.mutable.Buffer[A]): Sink[Task,A] =
-    channel((a: A) => Task.delay { buf += a })
+    channel.lift((a: A) => Task.delay { buf += a })
 
   /**
    * Creates a `Process[Task,String]` from the lines of a file, using
@@ -122,7 +123,7 @@ object io {
    * specific side effects on that `PrintStream`.
    */
   def printStreamSink[O](out: PrintStream)(f: (PrintStream, O) => Unit): Sink[Task, O] =
-    channel((o: O) => Task.delay {
+    channel.lift((o: O) => Task.delay {
       f(out, o)
       if (out.checkError)
         throw Cause.Terminated(Cause.End)
@@ -212,4 +213,137 @@ object io {
         else buf.take(m)
       }}
     }
+
+  /**
+   * Converts a source to a mutable `InputStream`.  The resulting input stream
+   * should be reasonably efficient and supports early termination (i.e. all
+   * finalizers associated with the input process will be run if the stream is
+   * closed).
+   */
+  def toInputStream(p: Process[Task, ByteVector]): InputStream = new InputStream {
+    import Cause.{EarlyCause, End, Kill}
+
+    var cur = p
+
+    var index = 0
+    var chunks: Seq[ByteVector] = Nil    // we only consider the head to be valid at any point in time
+
+    def read(): Int = {
+      if (cur.isHalt && chunks.isEmpty) {
+        -1
+      } else {
+        val buffer = new Array[Byte](1)
+        val bytesRead = read(buffer)
+        if (bytesRead == -1) {
+          -1
+        } else {
+          buffer(0) & 0xff
+        }
+      }
+    }
+
+    override def read(buffer: Array[Byte], offset: Int, length: Int): Int = {
+      if (cur.isHalt && chunks.isEmpty) {
+        -1
+      } else {
+        // when our index walks off the end of our last chunk, we need to Nil it out!
+        if (chunks.isEmpty) {
+          step()
+          read(buffer, offset, length)
+        } else {
+          @tailrec
+          def go(offset: Int, length: Int, read: Int): Int = {
+            if (chunks.isEmpty) {
+              // we already took care of the "halted at start" stillborn case, so we can safely just step
+              step()
+
+              if (cur.isHalt && chunks.isEmpty)
+                read         // whoops! we walked off the end of the stream and we're done
+              else
+                go(offset, length, read)
+            } else {
+              val chunk = chunks.head
+              val remaining = chunk.length - index
+
+              if (length <= remaining) {
+                chunk.copyToArray(buffer, offset, index, length)
+
+                if (length == remaining) {
+                  index = 0
+                  chunks = chunks.tail
+                } else {
+                  index += length
+                }
+
+                length + read
+              } else {
+                chunk.copyToArray(buffer, offset, index, remaining)
+
+                chunks = chunks.tail
+                go(offset + remaining, length - remaining, read + remaining)
+              }
+            }
+          }
+
+          go(offset, length, 0)
+        }
+      }
+    }
+
+    @tailrec
+    override def close() {
+      if (cur.isHalt && chunks.isEmpty) {
+        chunks = Nil
+      } else {
+        cur = cur.kill
+        cur.step match {
+          case Halt(End | Kill) =>
+            chunks = Nil
+
+          // rethrow halting errors
+          case Halt(Cause.Error(e: Error)) => throw e
+          case Halt(Cause.Error(e: Exception)) => throw new IOException(e)
+
+          case Step(Emit(_), _) => assert(false)    // this is impossible, according to the types
+
+          case Step(Await(request, receive), cont) => {
+            // yay! run the Task
+            cur = Util.Try(receive(EarlyCause.fromTaskResult(request.attempt.run)).run) +: cont
+            close()
+          }
+        }
+      }
+    }
+
+    @tailrec
+    def step(): Unit = {
+      index = 0
+      cur.step match {
+        case h @ Halt(End | Kill) =>
+          cur = h
+
+        // rethrow halting errors
+        case h @ Halt(Cause.Error(e: Error)) => {
+          cur = h
+          throw e
+        }
+
+        case h @ Halt(Cause.Error(e: Exception)) => {
+          cur = h
+          throw new IOException(e)
+        }
+
+        case Step(Emit(as), cont) => {
+          chunks = as
+          cur = cont.continue
+        }
+
+        case Step(Await(request, receive), cont) => {
+          // yay! run the Task
+          cur = Util.Try(receive(EarlyCause.fromTaskResult(request.attempt.run)).run) +: cont
+          step()    // push things onto the stack and then step further (tail recursively)
+        }
+      }
+    }
+  }
 }
