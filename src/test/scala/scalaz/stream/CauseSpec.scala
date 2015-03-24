@@ -24,7 +24,6 @@ import java.util.concurrent.ScheduledExecutorService
 object CauseSpec extends Properties("cause") {
   implicit val S: ScheduledExecutorService = DefaultScheduler
 
-  implicit val ES = Strategy.DefaultTimeoutScheduler
 
   property("suspend") = secure {
     val source = Process(1, 2, 3).toSource
