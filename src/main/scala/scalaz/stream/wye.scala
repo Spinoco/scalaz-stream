@@ -539,7 +539,7 @@ object wye {
 
     def unapply[I,I2,O](self: WyeAwaitL[I,I2,O]):
     Option[(EarlyCause \/ I => Wye[I,I2,O])] = self match {
-      case Await(req,rcv)
+      case Await(req,rcv,_)
         if req.tag == 0 =>
         Some((r : EarlyCause \/ I) =>
           Try(rcv.asInstanceOf[(EarlyCause \/ I) => Trampoline[Wye[I,I2,O]]](r).run)
@@ -550,7 +550,7 @@ object wye {
     /** Like `AwaitL.unapply` only allows fast test that wye is awaiting on left side */
     object is {
       def unapply[I,I2,O](self: WyeAwaitL[I,I2,O]):Boolean = self match {
-        case Await(req,rcv) if req.tag == 0 => true
+        case Await(req,rcv,_) if req.tag == 0 => true
         case _ => false
       }
     }
@@ -560,7 +560,7 @@ object wye {
   object AwaitR {
     def unapply[I,I2,O](self: WyeAwaitR[I,I2,O]):
     Option[(EarlyCause \/ I2 => Wye[I,I2,O])] = self match {
-      case Await(req,rcv)
+      case Await(req,rcv,_)
         if req.tag == 1 => Some((r : EarlyCause \/ I2) =>
         Try(rcv.asInstanceOf[(EarlyCause \/ I2) => Trampoline[Wye[I,I2,O]]](r).run)
       )
@@ -570,7 +570,7 @@ object wye {
     /** Like `AwaitR.unapply` only allows fast test that wye is awaiting on right side */
     object is {
       def unapply[I,I2,O](self: WyeAwaitR[I,I2,O]):Boolean = self match {
-        case Await(req,rcv) if req.tag == 1 => true
+        case Await(req,rcv,_) if req.tag == 1 => true
         case _ => false
       }
     }
@@ -578,7 +578,7 @@ object wye {
   object AwaitBoth {
     def unapply[I,I2,O](self: WyeAwaitBoth[I,I2,O]):
     Option[(ReceiveY[I,I2] => Wye[I,I2,O])] = self match {
-      case Await(req,rcv)
+      case Await(req,rcv,_)
         if req.tag == 2 => Some((r : ReceiveY[I,I2]) =>
         Try(rcv.asInstanceOf[(EarlyCause \/ ReceiveY[I,I2]) => Trampoline[Wye[I,I2,O]]](right(r)).run)
       )
@@ -589,7 +589,7 @@ object wye {
     /** Like `AwaitBoth.unapply` only allows fast test that wye is awaiting on both sides */
     object is {
       def unapply[I,I2,O](self: WyeAwaitBoth[I,I2,O]):Boolean = self match {
-        case Await(req,rcv) if req.tag == 2 => true
+        case Await(req,rcv,_) if req.tag == 2 => true
         case _ => false
       }
     }
@@ -836,9 +836,7 @@ object wye {
         }
       })(S)
 
-      repeatEval(Task.async[Seq[O]] { cb => a ! Get(cb) })
-      .flatMap(emitAll)
-      .onComplete(eval_(Task.async[Unit](cb => a ! DownDone(cb))))
+      repeatEval(Task.async[Seq[O]] { cb => a ! Get(cb) }) onHalt { _.asHalt } flatMap emitAll onComplete eval_(Task.async[Unit](cb => a ! DownDone(cb)))
     }
 }
 
@@ -886,4 +884,62 @@ protected[stream] trait WyeOps[+O] {
     * Note this terminates after BOTH sides terminate  */
   def either[O2>:O,O3](p2: Process[Task,O3])(implicit S:Strategy): Process[Task,O2 \/ O3] =
     self.wye(p2)(scalaz.stream.wye.either)
+}
+
+/**
+ * This class provides infix syntax specific to `Wye`. We put these here
+ * rather than trying to cram them into `Process` itself using implicit
+ * equality witnesses. This doesn't work out so well due to variance
+ * issues.
+ */
+final class WyeSyntax[I, I2, O](val self: Wye[I, I2, O]) extends AnyVal {
+
+  /**
+   * Apply a `Wye` to two `Iterable` inputs.
+   */
+  def apply(input: Iterable[I], input2: Iterable[I2]): IndexedSeq[O] = {
+    // this is probably rather slow
+    val src1 = Process.emitAll(input.toSeq).toSource
+    val src2 = Process.emitAll(input2.toSeq).toSource
+    src1.wye(src2)(self).runLog.run
+  }
+
+  /**
+   * Transform the left input of the given `Wye` using a `Process1`.
+   */
+  def attachL[I0](f: Process1[I0, I]): Wye[I0, I2, O] =
+    scalaz.stream.wye.attachL(f)(self)
+
+  /**
+   * Transform the right input of the given `Wye` using a `Process1`.
+   */
+  def attachR[I1](f: Process1[I1, I2]): Wye[I, I1, O] =
+    scalaz.stream.wye.attachR(f)(self)
+
+  /** Transform the left input to a `Wye`. */
+  def contramapL[I0](f: I0 => I): Wye[I0, I2, O] =
+    contramapL_(f)
+
+  /** Transform the right input to a `Wye`. */
+  def contramapR[I3](f: I3 => I2): Wye[I, I3, O] =
+    contramapR_(f)
+
+  private[stream] def contramapL_[I0](f: I0 => I): Wye[I0, I2, O] =
+    self.attachL(process1.lift(f))
+
+  private[stream] def contramapR_[I3](f: I3 => I2): Wye[I, I3, O] =
+    self.attachR(process1.lift(f))
+
+  /**
+   * Converting requests for the left input into normal termination.
+   * Note that `Both` requests are rewritten to fetch from the only input.
+   */
+  def detach1L: Wye[I, I2, O] = scalaz.stream.wye.detach1L(self)
+
+  /**
+   * Converting requests for the right input into normal termination.
+   * Note that `Both` requests are rewritten to fetch from the only input.
+   */
+  def detach1R: Wye[I, I2, O] = scalaz.stream.wye.detach1R(self)
+
 }

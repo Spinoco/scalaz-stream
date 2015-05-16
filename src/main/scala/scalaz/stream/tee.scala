@@ -223,7 +223,7 @@ object tee {
   object AwaitL {
     def unapply[I, I2, O](self: TeeAwaitL[I, I2, O]):
     Option[(EarlyCause \/ I => Tee[I, I2, O])] = self match {
-      case Await(req, rcv)
+      case Await(req, rcv,_)
         if req.tag == 0 => Some((r: EarlyCause \/ I) =>
         Try(rcv.asInstanceOf[(EarlyCause \/ I) => Trampoline[Tee[I,I2,O]]](r).run))
       case _                               => None
@@ -232,7 +232,7 @@ object tee {
     /** Like `AwaitL.unapply` only allows fast test that wye is awaiting on left side */
     object is {
       def unapply[I, I2, O](self: TeeAwaitL[I, I2, O]): Boolean = self match {
-        case Await(req, rcv) if req.tag == 0 => true
+        case Await(req, rcv,_) if req.tag == 0 => true
         case _                               => false
       }
     }
@@ -241,7 +241,7 @@ object tee {
   object AwaitR {
     def unapply[I, I2, O](self: TeeAwaitR[I, I2, O]):
     Option[(EarlyCause \/ I2 => Tee[I, I2, O])] = self match {
-      case Await(req, rcv)
+      case Await(req, rcv,_)
         if req.tag == 1 => Some((r: EarlyCause \/ I2) =>
         Try(rcv.asInstanceOf[(EarlyCause \/ I2) => Trampoline[Tee[I,I2,O]]](r).run))
       case _                               => None
@@ -251,7 +251,7 @@ object tee {
     /** Like `AwaitR.unapply` only allows fast test that wye is awaiting on left side */
     object is {
       def unapply[I, I2, O](self: TeeAwaitR[I, I2, O]): Boolean = self match {
-        case Await(req, rcv) if req.tag == 1 => true
+        case Await(req, rcv,_) if req.tag == 1 => true
         case _                               => false
       }
     }
@@ -302,5 +302,23 @@ private[stream] trait TeeOps[+F[_], +O] {
    */
   def until[F2[x] >: F[x], O2 >: O](condition: Process[F2, Boolean]): Process[F2, O2] =
     condition.tee(this)(scalaz.stream.tee.until)
+
+}
+
+/**
+ * This class provides infix syntax specific to `Tee`. We put these here
+ * rather than trying to cram them into `Process` itself using implicit
+ * equality witnesses. This doesn't work out so well due to variance
+ * issues.
+ */
+final class TeeSyntax[I, I2, O](val self: Tee[I, I2, O]) extends AnyVal {
+
+  /** Transform the left input to a `Tee`. */
+  def contramapL[I0](f: I0 => I): Tee[I0, I2, O] =
+    self.contramapL_(f).asInstanceOf[Tee[I0, I2, O]]
+
+  /** Transform the right input to a `Tee`. */
+  def contramapR[I3](f: I3 => I2): Tee[I, I3, O] =
+    self.contramapR_(f).asInstanceOf[Tee[I, I3, O]]
 
 }

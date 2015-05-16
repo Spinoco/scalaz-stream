@@ -392,8 +392,8 @@ object process1 {
    */
   def liftY[I,O](p: Process1[I,O]) : Wye[I,Any,O] = {
     p.step match {
-      case Step(Await(_,rcv), cont) =>
-        Await(L[I]: Env[I,Any]#Y[I],rcv) onHalt(rsn=> liftY(Halt(rsn) +: cont))
+      case Step(Await(_,rcv, cln), cont) =>
+        Await(L[I]: Env[I,Any]#Y[I],rcv, cln) onHalt(rsn=> liftY(Halt(rsn) +: cont))
 
       case Step(emt@Emit(os), cont) =>
         emt onHalt(rsn=> liftY(Halt(rsn) +: cont))
@@ -401,6 +401,22 @@ object process1 {
       case hlt@Halt(rsn) => hlt
     }
   }
+
+  /**
+   * Maps a running total according to `S` and the input with the function `f`.
+   *
+   * @example {{{
+   * scala> Process("Hello", "World")
+   *      |   .mapAccumulate(0)((l, s) => (l + s.length, s.head)).toList
+   * res0: List[(Int, Char)] = List((5,H), (10,W))
+   * }}}
+   * @see [[zipWithScan1]]
+   */
+  def mapAccumulate[S, A, B](init: S)(f: (S, A) => (S, B)): Process1[A, (S, B)] =
+    receive1 { a =>
+      val sb = f(init, a)
+      emit(sb) ++ mapAccumulate(sb._1)(f)
+    }
 
   /** Emits the greatest element of the input. */
   def maximum[A](implicit A: Order[A]): Process1[A,A] =
@@ -539,6 +555,13 @@ object process1 {
       case -\/(err) => throw err
       case \/-(a)   => emit(a)
     }
+
+  def stateScan[S, A, B](init: S)(f: A => State[S, B]): Process1[A, B] = {
+    await1[A] flatMap { a =>
+      val (s, b) = f(a) run init
+      emit(b) ++ stateScan(s)(f)
+    }
+  }
 
   /**
    * Similar to List.scan.
@@ -815,13 +838,47 @@ object process1 {
   object Await1 {
     /** deconstruct for `Await` directive of `Process1` */
     def unapply[I, O](self: Process1[I, O]): Option[EarlyCause \/ I => Process1[I, O]] = self match {
-      case Await(_, rcv) => Some((r:EarlyCause\/ I) => Try(rcv(r).run))
+      case Await(_, rcv,_) => Some((r:EarlyCause\/ I) => Try(rcv(r).run))
       case _             => None
     }
 
   }
 
 
+
+}
+
+final class Process1Syntax[I, O](val self: Process1[I, O]) extends AnyVal {
+
+  /** Apply this `Process` to an `Iterable`. */
+  def apply(input: Iterable[I]): IndexedSeq[O] =
+    Process(input.toSeq: _*).pipe(self).toIndexedSeq
+
+  /**
+   * Transform `self` to operate on the left hand side of an `\/`, passing
+   * through any values it receives on the right. Note that this halts
+   * whenever `self` halts.
+   */
+  def liftL[I2]: Process1[I \/ I2, O \/ I2] =
+    process1.liftL(self)
+
+  /**
+   * Transform `self` to operate on the right hand side of an `\/`, passing
+   * through any values it receives on the left. Note that this halts
+   * whenever `self` halts.
+   */
+  def liftR[I0]: Process1[I0 \/ I, I0 \/ O] =
+    process1.liftR(self)
+
+  /**
+   * Feed a single input to this `Process1`.
+   */
+  def feed1(i: I): Process1[I,O] =
+    process1.feed1(i)(self)
+
+  /** Transform the input of this `Process1`. */
+  def contramap[I0](f: I0 => I): Process1[I0, O] =
+    process1.lift(f).pipe(self)
 
 }
 
@@ -960,6 +1017,10 @@ private[stream] trait Process1Ops[+F[_],+O] {
   def lastOr[O2 >: O](o: => O2): Process[F,O2] =
     this |> process1.lastOr(o)
 
+  /** Alias for `this |> [[process1.mapAccumulate]](s)(f)`. */
+  def mapAccumulate[S, B](s: S)(f: (S, O) => (S, B)): Process[F, (S, B)] =
+    this |> process1.mapAccumulate(s)(f)
+
   /** Alias for `this |> [[process1.maximum]]`. */
   def maximum[O2 >: O](implicit O2: Order[O2]): Process[F,O2] =
     this |> process1.maximum(O2)
@@ -1019,6 +1080,10 @@ private[stream] trait Process1Ops[+F[_],+O] {
   /** Alias for `this |> [[process1.scan]](b)(f)`. */
   def scan[B](b: B)(f: (B,O) => B): Process[F,B] =
     this |> process1.scan(b)(f)
+
+  /** Alias for `this |> [[process1.stateScan]](init)(f)`. */
+  def stateScan[S, B](init: S)(f: O => State[S, B]): Process[F, B] =
+    this |> process1.stateScan(init)(f)
 
   /** Alias for `this |> [[process1.scanMap]](f)(M)`. */
   def scanMap[M](f: O => M)(implicit M: Monoid[M]): Process[F,M] =

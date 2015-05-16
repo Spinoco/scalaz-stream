@@ -13,7 +13,7 @@ import scala.concurrent.duration._
 import scala.concurrent.SyncVar
 
 
-object WyeSpec extends  Properties("Wye"){
+class WyeSpec extends  Properties("Wye"){
 
   implicit val S = Strategy.DefaultStrategy
   implicit val scheduler = scalaz.stream.DefaultScheduler
@@ -505,5 +505,16 @@ object WyeSpec extends  Properties("Wye"){
       innerCleanup :| "innerCleanup" &&
       outerCleanup :| "outerCleanup"
       !deadlocked :| "avoided deadlock"
+  }
+
+  property("kill appended chain") = secure {
+    (0 until 100) forall { _ =>
+      val q = async.unboundedQueue[Int]
+      val data = emitAll(List(1, 2, 3))
+
+      val results = (emit(true) wye (q.dequeue observe q.enqueue append data))(wye.interrupt).runLog.timed(3000).run
+
+      results == Seq()
+    }
   }
 }

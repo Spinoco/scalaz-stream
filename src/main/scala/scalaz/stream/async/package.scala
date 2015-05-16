@@ -9,22 +9,35 @@ import scalaz.\/._
 package object async {
 
   /**
-   * Creates bounded queue that is bound by supplied max size bound.
+   * Creates a bounded queue that is bound by supplied max size bound.
    * Please see [[scalaz.stream.async.mutable.Queue]] for more details.
-   * @param max maximum size of queue (must be > 0)
+   * @param max The maximum size of the queue (must be > 0)
+   * @param recover Flag controlling automatic dequeue error recovery semantics.  When
+   * false (the default), data may be lost in the event of an error during dequeue.
+   * When true, data will never be lost on dequeue, but concurrent dequeue processes
+   * may see data out of order under certain error conditions.
    */
-  def boundedQueue[A](max: Int)(implicit S: Strategy): Queue[A] = {
+  def boundedQueue[A](max: Int, recover: Boolean = false)(implicit S: Strategy): Queue[A] = {
     if (max <= 0)
       throw new IllegalArgumentException(s"queue bound must be greater than zero (got $max)")
     else
-      Queue[A](max)
+      Queue[A](max, recover)
   }
 
-
   /**
-   * Creates unbounded queue. see [[scalaz.stream.async.mutable.Queue]] for more
+   * Creates an unbounded queue. see [[scalaz.stream.async.mutable.Queue]] for more
    */
   def unboundedQueue[A](implicit S: Strategy): Queue[A] = Queue[A](0)
+
+  def unboundedQueue[A](recover: Boolean)(implicit S: Strategy): Queue[A] = Queue[A](0, recover)
+
+  /**
+   * Builds a queue that functions as a circular buffer. Up to `size` elements of
+   * type `A` will accumulate on the queue and then it will begin overwriting
+   * the oldest elements. Thus an enqueue process will never wait.
+   * @param size The size of the circular buffer (must be > 0)
+   */
+  def circularBuffer[A](size: Int)(implicit S: Strategy): Queue[A] = CircularBuffer[A](size)
 
   /**
    * Create a new continuous signal which may be controlled asynchronously.
