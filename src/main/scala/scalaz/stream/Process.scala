@@ -597,7 +597,7 @@ object Process extends ProcessInstances {
   case class Await[+F[_], A, +O](
     req: F[A]
     , rcv: (EarlyCause \/ A) => Trampoline[Process[F, O]] @uncheckedVariance
-    , cleanup : A => Trampoline[Process[F,Nothing]]
+    , cleanup : A => Trampoline[Process[F,Nothing]] @uncheckedVariance
     ) extends HaltEmitOrAwait[F, O] with EmitOrAwait[F, O] {
     /**
      * Helper to modify the result of `rcv` parameter of await stack-safely on trampoline.

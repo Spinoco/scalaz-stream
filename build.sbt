@@ -14,6 +14,7 @@ scalaVersion := "2.11.6"
 
 scalacOptions ++= Seq(
   "-feature",
+  "-deprecation",
   "-language:implicitConversions",
   "-language:higherKinds",
   "-language:existentials",
@@ -55,6 +56,8 @@ credentials += {
       Credentials(Path.userHome / ".ivy2" / ".credentials")
   }
 }
+
+initialCommands := "import scalaz.stream._"
 
 publishMavenStyle := true
 
