@@ -4,7 +4,7 @@ import Cause._
 import org.scalacheck.Prop._
 import org.scalacheck.Properties
 
-import scalaz.concurrent.{Strategy, Task}
+import scalaz.concurrent.Task
 import scalaz.stream.Process._
 import scalaz.syntax.equal._
 import scalaz.std.anyVal._
@@ -23,7 +23,6 @@ import java.util.concurrent.ScheduledExecutorService
  */
 class CauseSpec extends Properties("cause") {
   implicit val S: ScheduledExecutorService = DefaultScheduler
-
 
   property("suspend") = secure {
     val source = Process(1, 2, 3).toSource
