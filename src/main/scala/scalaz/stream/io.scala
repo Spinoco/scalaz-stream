@@ -2,7 +2,6 @@ package scalaz.stream
 
 import java.io._
 
-import scalaz.{-\/, \/-}
 import scalaz.concurrent.Task
 
 import scodec.bits.ByteVector
@@ -93,7 +92,7 @@ object io {
 
   /**
    * Creates a `Process[Task,String]` from the lines of a file, using
-   * the `resource` combinator to ensure the file is closed
+   * the `iteratorR` combinator to ensure the file is closed
    * when processing the stream of lines is finished.
    */
   def linesR(filename: String)(implicit codec: Codec): Process[Task,String] =
@@ -101,7 +100,7 @@ object io {
 
   /**
    * Creates a `Process[Task,String]` from the lines of the `InputStream`,
-   * using the `resource` combinator to ensure the `InputStream` is closed
+   * using the `iteratorR` combinator to ensure the `InputStream` is closed
    * when processing the stream of lines is finished.
    */
   def linesR(in: => InputStream)(implicit codec: Codec): Process[Task,String] =
@@ -109,14 +108,12 @@ object io {
 
   /**
    * Creates a `Process[Task,String]` from the lines of the `Source`,
-   * using the `resource` combinator to ensure the `Source` is closed
+   * using the `iteratorR` combinator to ensure the `Source` is closed
    * when processing the stream of lines is finished.
    */
-  def linesR(src: => Source): Process[Task,String] =
-    resource(Task.delay(src))(src => Task.delay(src.close)) { src =>
-      lazy val lines = src.getLines // A stateful iterator
-      Task.delay { if (lines.hasNext) lines.next else throw Cause.Terminated(Cause.End) }
-    }
+  def linesR(src: => Source): Process[Task,String] = {
+    iteratorR(Task.delay(src))(src => Task.delay(src.close()))(r => Task.delay(r.getLines()))
+  }
 
   /**
    * Creates `Sink` from an `PrintStream` using `f` to perform
@@ -145,7 +142,7 @@ object io {
    * Generic combinator for producing a `Process[F,O]` from some
    * effectful `O` source. The source is tied to some resource,
    * `R` (like a file handle) that we want to ensure is released.
-   * See `linesR` for an example use.
+   * See `chunkW` for an example use.
    */
   def resource[F[_],R,O](acquire: F[R])(
                          release: R => F[Unit])(
@@ -153,6 +150,39 @@ object io {
     bracket(acquire)(r => eval_(release(r))){
       r => repeatEval(step(r))
     } onHalt { _.asHalt }
+
+  /**
+   * Create a Process from an iterator. The value behind the iterator should be
+   * immutable and not rely on an external resource. If that is not the case, use
+   * `io.iteratorR`.
+   */
+  def iterator[O](i: Task[Iterator[O]]): Process[Task, O] = {
+    await(i) { iterator =>
+      val hasNext = Task delay { iterator.hasNext }
+      val next = Task delay { iterator.next() }
+
+      def go: Process[Task, O] = await(hasNext) { hn => if (hn) eval(next) ++ go else halt }
+
+      go
+    }
+  }
+
+  /**
+   * Create a Process from an iterator that is tied to some resource,
+   * `R` (like a file handle) that we want to ensure is released.
+   * See `linesR` for an example use.
+   * @param req acquires the resource
+   * @param release releases the resource
+   * @param mkIterator creates the iterator from the resource
+   * @tparam R is the resource
+   * @tparam O is a value in the iterator
+   * @return
+   */
+  def iteratorR[R, O](req: Task[R])(
+                     release: R => Task[Unit])(
+                     mkIterator: R => Task[Iterator[O]]): Process[Task, O] = {
+    bracket[Task, R, O](req)(r => Process.eval_(release(r)))(r => iterator(mkIterator(r)) )
+  }
 
   /**
    * The standard input stream, as `Process`. This `Process` repeatedly awaits
@@ -300,16 +330,19 @@ object io {
           case Halt(End | Kill) =>
             chunks = Nil
 
+          case Halt(Cause.Error(e: IOException)) => throw e
           case Halt(Cause.Error(e: Exception)) => throw new IOException(e)
 
           // rethrow halting errors
           case Halt(Cause.Error(e)) => throw e
 
-          case Step(Emit(_), _) => assert(false)    // this is impossible, according to the types
+          case Step(Emit(_), cont) =>
+            cur = cont.continue
+            close()
 
-          case Step(Await(request, receive, _), cont) => { // todo: ??? Cleanup
+          case Step(await: Await[Task,_,ByteVector], cont) => { // todo: ??? Cleanup
             // yay! run the Task
-            cur = Util.Try(receive(EarlyCause.fromTaskResult(request.attempt.run)).run) +: cont
+            cur = Util.Try(await.evaluate.run) +: cont
             close()
           }
         }
@@ -322,6 +355,11 @@ object io {
       cur.step match {
         case h @ Halt(End | Kill) =>
           cur = h
+
+        case h @ Halt(Cause.Error(e: IOException)) => {
+          cur = h
+          throw e
+        }
 
         case h @ Halt(Cause.Error(e: Exception)) => {
           cur = h

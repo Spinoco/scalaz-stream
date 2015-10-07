@@ -451,8 +451,20 @@ sealed trait Process[+F[_], +O]
 
   }
 
+  final def uncons[F2[x] >: F[x], O2 >: O](implicit F: Monad[F2], C: Catchable[F2]): F2[(O2, Process[F2, O2])] =
+    unconsOption(F, C).flatMap(_.map(F.point[(O2, Process[F2, O2])](_)).getOrElse(C.fail(new NoSuchElementException)))
 
-
+  final def unconsOption[F2[x] >: F[x], O2 >: O](implicit F: Monad[F2], C: Catchable[F2]): F2[Option[(O2, Process[F2, O2])]] = step match {
+    case Step(head, next) => head match {
+      case Emit(as) => as.headOption.map(x => F.point[Option[(O2, Process[F2, O2])]](Some((x, Process.emitAll[O2](as drop 1) +: next)))) getOrElse
+          next.continue.unconsOption
+      case await: Await[F2, _, O2] => await.evaluate.flatMap(p => (p +: next).unconsOption(F,C))
+    }
+    case Halt(cause) => cause match {
+      case End | Kill => F.point(None)
+      case _ : EarlyCause => C.fail(cause.asThrowable)
+    }
+  }
 
   ///////////////////////////////////////////
   //
@@ -475,10 +487,7 @@ sealed trait Process[+F[_], +O]
                 go(cont.continue.asInstanceOf[Process[F2,O]], nacc)
               }
             case (awt:Await[F2,Any,O]@unchecked, cont) =>
-              F.bind(C.attempt(awt.req)) { r =>
-                go((Try(awt.rcv(EarlyCause.fromTaskResult(r)).run) +: cont).asInstanceOf[Process[F2,O]]
-                  , acc)
-              }
+              awt.evaluate.flatMap(p => go(p +: cont, acc))
           }
         case Halt(End) => F.point(acc)
         case Halt(Kill) => F.point(acc)
@@ -504,12 +513,18 @@ sealed trait Process[+F[_], +O]
   }
 
   /** Run this `Process` solely for its final emitted value, if one exists. */
-  final def runLast[F2[x] >: F[x], O2 >: O](implicit F: Monad[F2], C: Catchable[F2]): F2[Option[O2]] =
-    F.map(this.last.runLog[F2,O2])(_.lastOption)
+  final def runLast[F2[x] >: F[x], O2 >: O](implicit F: Monad[F2], C: Catchable[F2]): F2[Option[O2]] = {
+    implicit val lastOpt = new Monoid[Option[O2]] {
+      def zero = None
+      def append(left: Option[O2], right: => Option[O2]) = right orElse left      // bias toward the end
+    }
+
+    this.last.runFoldMap[F2, Option[O2]]({ Some(_) })
+  }
 
   /** Run this `Process` solely for its final emitted value, if one exists, using `o2` otherwise. */
   final def runLastOr[F2[x] >: F[x], O2 >: O](o2: => O2)(implicit F: Monad[F2], C: Catchable[F2]): F2[O2] =
-    F.map(this.last.runLog[F2,O2])(_.lastOption.getOrElse(o2))
+    runLast[F2, O2] map { _ getOrElse o2 }
 
   /** Run this `Process`, purely for its effects. */
   final def run[F2[x] >: F[x]](implicit F: Monad[F2], C: Catchable[F2]): F2[Unit] =
@@ -607,6 +622,11 @@ object Process extends ProcessInstances {
      */
     def extend[F2[x] >: F[x], O2](f: Process[F, O] => Process[F2, O2]): Await[F2, A, O2] =
       Await[F2, A, O2](req, r => Trampoline.suspend(rcv(r)).map(f), preempt)
+
+    def evaluate[F2[x] >: F[x], O2 >: O](implicit F: Monad[F2], C: Catchable[F2]): F2[Process[F2,O2]] =
+      C.attempt(req).map { e =>
+        rcv(EarlyCause.fromTaskResult(e)).run
+      }
   }
 
 
@@ -762,16 +782,16 @@ object Process extends ProcessInstances {
 
   /**
    * Resource and preemption safe `await` constructor.
-   * 
+   *
    * Use this combinator, when acquiring resources. This build a process that when run
    * evaluates `req`, and then runs `rcv`. Once `rcv` is completed, fails, or is interrupted, it will run `release`
-   * 
+   *
    * When the acquisition (`req`) is interrupted, neither `release` or `rcv` is run, however when the req was interrupted after
    * resource in `req` was acquired then, the `release` is run.
    *
    * If,the acquisition fails, use `bracket(req)(onPreempt)(rcv).onFailure(err => ???)` code to recover from the
    * failure eventually.
-   * 
+   *
    */
   def bracket[F[_], A, O](req: F[A])(release: A => Process[F, Nothing])(rcv: A => Process[F, O]): Process[F, O] = {
     Await(req,
@@ -1011,7 +1031,7 @@ object Process extends ProcessInstances {
   implicit class ProcessSyntax[F[_],O](val self: Process[F,O]) extends AnyVal {
     /** Feed this `Process` through the given effectful `Channel`. */
     def through[F2[x]>:F[x],O2](f: Channel[F2,O,O2]): Process[F2,O2] =
-        self.zipWith(f)((o,f) => f(o)).eval onHalt { _.asHalt }     // very gross; I don't like this, but not sure what to do
+      self.zipWith(f)((o,f) => f(o)).eval onHalt { _.asHalt }     // very gross; I don't like this, but not sure what to do
 
     /**
      * Feed this `Process` through the given effectful `Channel`, signaling
@@ -1028,7 +1048,7 @@ object Process extends ProcessInstances {
 
     /** Attach a `Sink` to the output of this `Process` but echo the original. */
     def observe[F2[x]>:F[x]](f: Sink[F2,O]): Process[F2,O] =
-      self.zipWith(f)((o,f) => (o,f(o))).flatMap { case (orig,action) => emit(action).eval.drain ++ emit(orig) }
+      self.zipWith(f)((o,f) => (o,f(o))) flatMap { case (orig,action) => eval(action).drain ++ emit(orig) } onHalt { _.asHalt }
 
   }
 

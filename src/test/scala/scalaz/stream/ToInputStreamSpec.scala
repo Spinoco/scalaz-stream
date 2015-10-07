@@ -1,7 +1,7 @@
 package scalaz.stream
 
 import org.scalacheck._
-import Prop.{ BooleanOperators, forAll, secure, throws }
+import Prop.{ BooleanOperators, forAll, protect, throws }
 
 import scodec.bits.ByteVector
 
@@ -67,7 +67,7 @@ class ToInputStreamSpec extends Properties("toInputStream") {
     List(buffer: _*) == bytes.flatten
   }
 
-  property("handles one append within an await") = secure {
+  property("handles one append within an await") = protect {
     val bytes: List[List[List[Byte]]] = List(List(), List(List(127)))
     val length = bytes map { _ map { _.length } sum } sum
 
@@ -102,7 +102,7 @@ class ToInputStreamSpec extends Properties("toInputStream") {
     List(buffer: _*) == (bytes flatMap { _.flatten })
   }
 
-  property("invokes finalizers when terminated early") = secure {
+  property("invokes finalizers when terminated early") = protect {
     import Process._
 
     var flag = false
@@ -119,20 +119,39 @@ class ToInputStreamSpec extends Properties("toInputStream") {
       (read == 42) :| "read value"
   }
 
-  property("safely read byte 255 as an Int") = secure {
+  property("invokes writer emitters when terminated early") = protect {
+    import Process._
+
+    var flag = false
+    val setter = Task delay { flag = true }
+
+    val p = emit(Array[Byte](42)) ++ emit(Array[Byte](24)).toSource
+    val snk = sink.lift { _: Any => setter }
+    val pw = writer.logged(p).observeW(snk.pipeIn(process1.chunkAll)).stripW
+
+    val is = io.toInputStream(pw map { ByteVector view _ })
+
+    val read = is.read()
+    is.close()
+
+    (flag == true) :| "finalizer flag" &&
+      (read == 42) :| "read value"
+  }
+
+  property("safely read byte 255 as an Int") = protect {
     val p = Process emit Array[Byte](-1)
     val is = io.toInputStream(p map { ByteVector view _ })
 
     is.read() == 255
   }
 
-  property("handles exceptions") = secure {
+  property("handles exceptions") = protect {
     val p: Process[Task, ByteVector] = Process eval Task.fail(new Exception())
     val is = io.toInputStream(p)
     throws(classOf[IOException])(is.read())
   }
 
-  property("after close read should return -1") = secure {
+  property("after close read should return -1") = protect {
     val p = Process emitAll Seq(Array[Byte](1, 2), Array[Byte](3, 4))
     val is = io.toInputStream(p map { ByteVector view _ })
     is.read()
