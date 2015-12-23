@@ -23,7 +23,26 @@ lazy val commonSettings = Seq(
     import fs2._
     import fs2.util._
   """,
-  doctestWithDependencies := false
+  doctestWithDependencies := false,
+  resolvers := Seq(
+    MavenRepository("Spinoco releases", "https://maven.spinoco.com/nexus/content/repositories/releases/")
+    , MavenRepository("Spinoco snapshots", "https://maven.spinoco.com/nexus/content/repositories/snapshots/")
+  ),
+  credentials := {
+    Seq("build.publish.user", "build.publish.password").map(k => Option(System.getProperty(k))) match {
+      case Seq(Some(user), Some(pass)) =>
+        Seq(Credentials("Sonatype Nexus Repository Manager", "oss.sonatype.org", user, pass))
+      case _ =>
+        Seq(Credentials(Path.userHome / ".ivy2" / ".credentials"))
+    }
+  },
+  publishTo := {
+    val nexus = "https://maven.spinoco.com/"
+    if (version.value.trim.endsWith("SNAPSHOT"))
+      Some("Snapshots" at nexus + "nexus/content/repositories/snapshots")
+    else
+      Some("Releases" at nexus + "nexus/content/repositories/releases")
+  }
 ) ++ testSettings ++ scaladocSettings ++ gitSettings
 
 lazy val testSettings = Seq(
@@ -87,3 +106,6 @@ lazy val benchmark = project.in(file("benchmark")).
   settings(
    name := "fs2-benchmark"
   ).dependsOn(io)
+
+
+
