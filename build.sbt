@@ -25,8 +25,8 @@ lazy val commonSettings = Seq(
   """,
   doctestWithDependencies := false,
   resolvers := Seq(
-    MavenRepository("Spinoco releases", "https://maven.spinoco.com/nexus/content/repositories/releases/")
-    , MavenRepository("Spinoco snapshots", "https://maven.spinoco.com/nexus/content/repositories/snapshots/")
+    MavenRepository("Spinoco releases", "https://maven.spinoco.com/nexus/content/repositories/spinoco_public_releases/")
+    , MavenRepository("Spinoco snapshots", "https://maven.spinoco.com/nexus/content/repositories/spinoco_public_snapshots/")
   ),
   credentials := {
     Seq("build.publish.user", "build.publish.password").map(k => Option(System.getProperty(k))) match {
@@ -39,9 +39,9 @@ lazy val commonSettings = Seq(
   publishTo := {
     val nexus = "https://maven.spinoco.com/"
     if (version.value.trim.endsWith("SNAPSHOT"))
-      Some("Snapshots" at nexus + "nexus/content/repositories/snapshots")
+      Some("Snapshots" at nexus + "nexus/content/repositories/spinoco_public_snapshots")
     else
-      Some("Releases" at nexus + "nexus/content/repositories/releases")
+      Some("Releases" at nexus + "nexus/content/repositories/spinoco_public_releases")
   }
 ) ++ testSettings ++ scaladocSettings ++ gitSettings
 
