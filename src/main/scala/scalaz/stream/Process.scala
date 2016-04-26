@@ -1233,6 +1233,7 @@ object Process extends ProcessInstances {
                 val barrier = new AtomicBoolean(false)
 
                 // detects what completion/interrupt case we're in and factors out race conditions
+                @tailrec
                 def handle(
                     // interrupted before the task started running; task never ran!
                     preStep: EarlyCause => Unit,
@@ -1274,7 +1275,13 @@ object Process extends ProcessInstances {
                           either <- result
                         } yield {
                           either match {
-                            case -\/(t) => ()       // I guess we just swallow the exception here? no idea what to do, since we don't have a handler for this case
+                            case -\/(t) =>
+                              println("UNEXPECTED UNHANDLED IN RUN-ASYNC: " +  t.getMessage)
+                              t.printStackTrace()
+                              println(">>>" + result)
+                              println("~~~" + inter)
+                              println("---"*50)
+                              ()       // I guess we just swallow the exception here? no idea what to do, since we don't have a handler for this case
                             case \/-(r) => postStep(Try(cln(r).run), cause)     // produce the preemption handler, given the resulting resource
                           }
                         }
@@ -1293,7 +1300,9 @@ object Process extends ProcessInstances {
                                   unpack(result) match {
                                     case Some(head) => completed(head +: cont)
 
-                                    case None => ???      // didn't match any condition; fail! (probably a double-None bug in completeInterruptibly)
+                                    case None =>
+                                      println("DOUBLE-NONE BUG COMPLETET INTERRUPTIBLY 1")
+                                      ???      // didn't match any condition; fail! (probably a double-None bug in completeInterruptibly)
                                   }
                                 }
                               }
@@ -1303,7 +1312,9 @@ object Process extends ProcessInstances {
                                   // we detected mid-step interrupt; this needs to transmute to post-step; loop back to the top!
                                   handle(preStep = preStep, midStep = midStep, postStep = postStep, exceptional = exceptional, completed = completed)(result)
 
-                                case None => ???        // wtf?! (apparently we were called twice with None; bug in completeInterruptibly)
+                                case None =>
+                                  println("DOUBLE-NONE BUG COMPLETET INTERRUPTIBLY 2")
+                                  ???        // wtf?! (apparently we were called twice with None; bug in completeInterruptibly)
                               }
                             }
                           }
