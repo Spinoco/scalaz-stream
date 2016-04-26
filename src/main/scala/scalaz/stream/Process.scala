@@ -1301,7 +1301,7 @@ object Process extends ProcessInstances {
                                     case Some(head) => completed(head +: cont)
 
                                     case None =>
-                                      println("DOUBLE-NONE BUG COMPLETET INTERRUPTIBLY 1")
+                                      println("DOUBLE-NONE BUG COMPLETED INTERRUPTIBLY 1")
                                       ???      // didn't match any condition; fail! (probably a double-None bug in completeInterruptibly)
                                   }
                                 }
@@ -1313,7 +1313,7 @@ object Process extends ProcessInstances {
                                   handle(preStep = preStep, midStep = midStep, postStep = postStep, exceptional = exceptional, completed = completed)(result)
 
                                 case None =>
-                                  println("DOUBLE-NONE BUG COMPLETET INTERRUPTIBLY 2")
+                                  println("DOUBLE-NONE BUG COMPLETED INTERRUPTIBLY 2")
                                   ???        // wtf?! (apparently we were called twice with None; bug in completeInterruptibly)
                               }
                             }
