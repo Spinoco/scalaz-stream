@@ -1,5 +1,7 @@
 package scalaz.stream
 
+import java.util.logging.Level
+
 import Cause._
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
@@ -1130,6 +1132,15 @@ object Process extends ProcessInstances {
     def liftIO: Process[Task, O] = self
   }
 
+  val AsyncLogger = java.util.logging.Logger.getLogger("spinoco.process.async")
+
+  private def dump(s:String, pars : => Seq[Any]):Unit = {
+    if (AsyncLogger.getLevel == Level.FINEST) {
+      println(Thread.currentThread().getName + "| " + s +  ": " + pars.toString)
+    }
+  }
+
+
   /**
    * Syntax for processes that have its effects wrapped in Task
    */
@@ -1247,11 +1258,15 @@ object Process extends ProcessInstances {
                     completed: Process[Task, O] => Unit)(result: Option[Throwable \/ a]): Unit = result match {
 
                   // interrupted via the `Task.fail` defined in `checkInterrupt`
-                  case Some(-\/(PreStepAbort(cause: EarlyCause))) => preStep(cause)
+                  case Some(-\/(PreStepAbort(cause: EarlyCause))) =>
+                    dump("Invoked PreStepAbort", Seq(cause))
+                    preStep(cause)
 
                   case result => {
+
                     val inter = interrupted.get().toOption
 
+                    dump("Invoked handle with result", Seq(result, inter, barrier.get()))
                     assert(!inter.isEmpty || result.isDefined)
 
                     // interrupted via the callback mechanism, checked in `completeInterruptibly`
@@ -1270,19 +1285,23 @@ object Process extends ProcessInstances {
                       case None => {
                         // completed the task, `interrupted.get()` is defined, and so we were interrupted post-completion
                         // always matches to a `Some` (we always have value)
-                        val pc = for {
-                          cause <- inter
-                          either <- result
-                        } yield {
-                          either match {
-                            case -\/(t) =>
-                              println("UNEXPECTED UNHANDLED IN RUN-ASYNC: " +  t.getMessage)
-                              t.printStackTrace()
-                              println(">>>" + result)
-                              println("~~~" + inter)
-                              println("---"*50)
-                              ()       // I guess we just swallow the exception here? no idea what to do, since we don't have a handler for this case
-                            case \/-(r) => postStep(Try(cln(r).run), cause)     // produce the preemption handler, given the resulting resource
+
+                        val pc =
+                        inter flatMap { cause =>
+                          result map { either =>
+                            either match {
+                              case -\/(t) =>
+                                println("UNEXPECTED UNHANDLED IN RUN-ASYNC: " +  t.getMessage)
+                                t.printStackTrace()
+                                println(">>>" + result)
+                                println("~~~" + inter)
+                                println("---"*50)
+                                ()       // I guess we just swallow the exception here? no idea what to do, since we don't have a handler for this case
+                              case \/-(r) =>
+                                val np = Try(cln(r).run)
+                                dump("post step invoking", Seq(np, np.step, cause))
+                                postStep(np, cause)     // produce the preemption handler, given the resulting resource
+                            }
                           }
                         }
 
