@@ -13,7 +13,7 @@ We'll consider each of these in turn.
 
 ## Building streams
 
-A `Stream[F,W]` (formerly `Process`) represents a discrete stream of `W` values which may request evaluation of `F` effects. We'll call `F` the _effect type_ and `W` the _output type_. Here are some example streams (these assume you've done `import fs2.{Stream,Task}`):
+A `Stream[F,W]` (formerly `Process`) represents a discrete stream of `W` values which may request evaluation of `F` effects. We'll call `F` the _effect type_ and `W` the _output type_. Here are some example streams (these assume you've done `import fs2.Stream` and `import fs2.util.Task`):
 
 * `Stream.emit(1)`: A `Stream[Nothing,Int]`. Its effect type is `Nothing` since it requests evaluation of no effects.
 * `Stream.empty`: A `Stream[Nothing,Nothing]` which emits no values. Its output type is `Nothing` since it emits no elements.
@@ -32,17 +32,18 @@ For the full set of operations primitive operations on `Stream`, see the [`Strea
 
 To interpret a `Stream[F,A]`, use `runFold`, `runLog`, or one of the other `run*` functions on `Stream`. These produce a `fs2.Free` which can then be interpreted to produce actual effects. Here's a complete example:
 
-```Scala
-import fs2.{Stream, Task}
+```tut:book
+import fs2.Stream
+import fs2.util.Task
 
 def run[A](s: Stream[Task,A]): Vector[A] =
-  s.runLog.run.run // explanation below
+  s.runLog.run.unsafeRun // explanation below
 
 val s: Stream[Nothing,Int] = Stream((0 until 100): _*)
 run(s) == Vector.range(0, 100)
 ```
 
-What's going on with all the `.run` calls? The `s.runLog` produces a `fs2.Free[Task,Vector[A]]`. Calling `run` on that gives us a `Task[Vector[A]]`. And finally, calling `.run` on that `Task` gives us our `Vector[A]`. Note that this last `.run` is the _only_ portion of the code that actually _does_ anything. Streams (and `Free` and `Task`) are just different kinds of _descriptions_ of what is to be done. Nothing actually happens until we run this final description.
+What's going on with all the `run` calls? The `s.runLog` produces a `fs2.Free[Task,Vector[A]]`. Calling `run` on that gives us a `Task[Vector[A]]`. And finally, calling `.unsafeRun` on that `Task` gives us our `Vector[A]`. Note that this last `.unsafeRun` is the _only_ portion of the code that actually _does_ anything. Streams (and `Free` and `Task`) are just different kinds of _descriptions_ of what is to be done. Nothing actually happens until we run this final description.
 
 Note also that FS2 does not care what effect type you use for your streams. You may use the built-in [`Task` type](http://code.fs2.co/master/src/main/scala/fs2/Streams.scala) for effects or bring your own, just by implementing a few interfaces for your effect type. (`fs2.Catchable` and optionally `fs2.Async` if you wish to use various concurrent operations discussed later.)
 
@@ -67,19 +68,20 @@ The `trait Pull[+F[_],+W,+R]` represents a program that may pull values from one
 
 Let's look at the core operation for implementing `take`. It's just a recursive function:
 
-```Scala
-package fs2
+```tut:book
+import fs2._
+import fs2.Pull
+import fs2.Stream.Handle
 import fs2.Step._ // provides '#:' constructor, also called Step
 
-object Pull {
+object Pull_ {
 
   def take[F[_],W](n: Int): Handle[F,W] => Pull[F,W,Handle[F,W]] =
     h => for {
       chunk #: h <- if (n <= 0) Pull.done else Pull.awaitLimit(n)(h)
-      tl <- Pull.write(chunk) >> take(n - chunk.size)(h)
+      tl <- Pull.output(chunk) >> take(n - chunk.size)(h)
     } yield tl
 
-  ...
 }
 ```
 
@@ -98,11 +100,11 @@ There's a lot going on in this one line:
   * We can also `h.await1` to read just a single element, `h.await` to read a single `Chunk` of however many are available, `Pull.awaitN(n)(h)` to obtain a `List[Chunk[A]]` totaling exactly `n` elements, and even `h.awaitAsync` and various other _asynchronous_ awaiting functions which we'll discuss in the next section.
 * Using the pattern `chunk #: h` (defined in `fs2.Step`), we destructure this `Step` to its `chunk: Chunk[W]` and its `h: Handle[F,W]`. This shadows the outer `h`, which is fine here since it isn't relevant anymore. (Note: nothing stops us from keeping the old `h` around and awaiting from it again if we like, though this isn't usually what we want since it will repeat all the effects of that await.)
 
-Moving on, the `Pull.write(chunk)` writes the chunk we just read to the _output_ of the `Pull`. This binds the `W` type in our `Pull[F,W,R]` we are constructing:
+Moving on, the `Pull.output(chunk)` writes the chunk we just read to the _output_ of the `Pull`. This binds the `W` type in our `Pull[F,W,R]` we are constructing:
 
-```
+```Scala
 // in fs2.Pull object
-def write[W](c: Chunk[W]): Pull[Nothing,W,Unit]
+def output[W](c: Chunk[W]): Pull[Nothing,W,Unit]
 ```
 
 It returns a result of `Unit`, which we generally don't care about. The `p >> p2` operator is equivalent to `p flatMap { _ => p2 }`; it just runs `p` for its effects but ignores its result.
@@ -111,7 +113,7 @@ So this line is writing the chunk we read, ignoring the `Unit` result, then recu
 
 ```Scala
       ...
-      tl <- Pull.write(chunk) >> take(n - chunk.size)(h)
+      tl <- Pull.output(chunk) >> take(n - chunk.size)(h)
     } yield tl
 ```
 
@@ -119,11 +121,13 @@ For the recursive call, we update the state, subtracting the `chunk.size` elemen
 
 To actually use a `Pull` to transform a `Stream`, we have to `run` it:
 
-```Scala
+```tut:book
 import fs2.{Pull,Stream}
 
 def take[F[_],W](n: Int)(s: Stream[F,W]): Stream[F,W] =
   s.open.flatMap { Pull.take(n) }.run
+  // s.open.flatMap(f).run is a common pattern -
+  // can be written `s.pull(f)`
 ```
 
 FS2 takes care to guarantee that any resources allocated by the `Pull` are released when the `run` completes. Note again that _nothing happens_ when we call `.run` on a `Pull`, it is merely establishing a scope in which all resource allocations are tracked so that they may be appropriately freed by the `Stream.runFold` interpreter. This interpreter guarantees _once and only once_ semantics for resource cleanup actions introduced by the `Stream.bracket` function.
@@ -140,8 +144,8 @@ TODO
 
 `Stream[F,W]` and `Pull[F,W,R]` are covariant in `F`, `W`, and `R`. This is important for usability and convenience, but covariance can often paper over what should really be type errors. For instance:
 
-``` Scala
-val s = Stream.emit(1) ++ Stream.emit("hello")
+```tut:fail
+Stream.emit(1) ++ Stream.emit("hello")
 ```
 
 We are trying to append a `Stream[Nothing,Int]` and a `Stream[Nothing,String]`, which really ought be a type error, but with covariance, Scala will gleefully infer `Any` as their common upper bound. Yikes. Luckily, FS2 implements a trick to catch these situations:
@@ -158,9 +162,10 @@ scala> Stream.emit(1) ++ Stream("hi")
 
 Informative! If you really want a dubious supertype like `Any`, `AnyRef`, `AnyVal`, `Product`, or `Serializable` to be inferred, just follow the instructions in the error message to supply a `RealSupertype` instance explicitly.
 
-``` Scala
-scala> Stream.emit(1).++(Stream("hi"))(RealSupertype.allow[Int,Any])
-res1: fs2.Stream[Nothing,Any] = fs2.Stream$$anon$4@2b7fa2d4
+```tut
+import fs2._
+import fs2.util._
+Stream.emit(1).++(Stream("hi"))(RealSupertype.allow[Int,Any], Sub1.sub1[Task])
 ```
 
 Ugly, as it should be.

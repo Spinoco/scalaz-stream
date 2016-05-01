@@ -14,7 +14,7 @@ The 0.9 release will include major new capabilities:
 * Pushback and peeking of streams, useful for streaming parsing tasks.
 * A simpler core, consisting of 22 primitive operations, from which all functionality in the library is derived.
 
-There's [an incomplete and slightly out of date guide for the new design](https://github.com/functional-streams-for-scala/fs2/blob/topic/redesign/docs/guide.markdown) if you'd like to get a feel for what the new version will be like.
+There's [an incomplete and slightly out of date guide for the new design](https://github.com/functional-streams-for-scala/fs2/blob/topic/redesign/docs/guide.md) if you'd like to get a feel for what the new version will be like.
 
 The rest of these docs pertain to the 0.8 scalaz-stream release. If you'd like to follow FS2 development, see [the 0.9 milestone](https://github.com/functional-streams-for-scala/fs2/milestones/0.9.0).
 
@@ -63,7 +63,7 @@ The library supports a number of other interesting use cases:
 
 ### Documentation and getting help ###
 
-There are examples (with commentary) in the test directory [`scalaz.stream.examples`](https://github.com/scalaz/scalaz-stream/tree/master/src/test/scala/scalaz/stream/examples). Also see [the wiki](https://github.com/scalaz/scalaz-stream/wiki) for more documentation. If you use `scalaz.stream`, you're strongly encouraged to submit additional examples and add to the wiki!
+There are examples (with commentary) in the test directory [`scalaz.stream.examples`](https://github.com/scalaz/scalaz-stream/tree/master/src/test/scala/scalaz/stream/examples). Also see [the wiki](https://github.com/functional-streams-for-scala/fs2/wiki) for more documentation. If you use `scalaz.stream`, you're strongly encouraged to submit additional examples and add to the wiki!
 
 For questions about the library, use the [scalaz mailing list](https://groups.google.com/forum/#!forum/scalaz) or the [scalaz-stream tag on StackOverflow](http://stackoverflow.com/questions/tagged/scalaz-stream).
 

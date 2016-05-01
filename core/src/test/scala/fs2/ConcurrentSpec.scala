@@ -1,58 +1,76 @@
 package fs2
 
-import TestUtil._
 import fs2.util.Task
-import fs2.Stream.Handle
-import java.util.concurrent.atomic.AtomicLong
-import org.scalacheck.Prop._
-import org.scalacheck._
 
-object ConcurrentSpec extends Properties("concurrent") {
+class ConcurrentSpec extends Fs2Spec {
 
-  val x = implicitly[Strategy]
+  "concurrent" - {
 
-  property("either") = forAll { (s1: PureStream[Int], s2: PureStream[Int]) =>
-    val shouldCompile = s1.get.either(s2.get.covary[Task])
-    val es = run { s1.get.covary[Task].pipe2(s2.get)(wye.either) }
-    (es.collect { case Left(i) => i } ?= run(s1.get)) &&
-    (es.collect { case Right(i) => i } ?= run(s2.get))
+    "either" in forAll { (s1: PureStream[Int], s2: PureStream[Int]) =>
+      val shouldCompile = s1.get.either(s2.get.covary[Task])
+      val es = runLog { s1.get.covary[Task].through2(s2.get)(pipe2.either) }
+      es.collect { case Left(i) => i } shouldBe runLog(s1.get)
+      es.collect { case Right(i) => i } shouldBe runLog(s2.get)
+    }
+
+    "merge" in forAll { (s1: PureStream[Int], s2: PureStream[Int]) =>
+      runLog { s1.get.merge(s2.get.covary[Task]) }.toSet shouldBe
+      (runLog(s1.get).toSet ++ runLog(s2.get).toSet)
+    }
+
+    "merge (left/right identity)" in forAll { (s1: PureStream[Int]) =>
+      runLog { s1.get.merge(Stream.empty.covary[Task]) } shouldBe runLog(s1.get)
+      runLog { Stream.empty.through2(s1.get.covary[Task])(pipe2.merge) } shouldBe runLog(s1.get)
+    }
+
+    "merge/join consistency" in forAll { (s1: PureStream[Int], s2: PureStream[Int]) =>
+      runLog { s1.get.through2v(s2.get.covary[Task])(pipe2.merge) }.toSet shouldBe
+      runLog { concurrent.join(2)(Stream(s1.get.covary[Task], s2.get.covary[Task])) }.toSet
+    }
+
+    "join (1)" in forAll { (s1: PureStream[Int]) =>
+      runLog { concurrent.join(1)(s1.get.covary[Task].map(Stream.emit)) } shouldBe runLog { s1.get }
+    }
+
+    "join (2)" in forAll { (s1: PureStream[Int], n: SmallPositive) =>
+      runLog { concurrent.join(n.get)(s1.get.covary[Task].map(Stream.emit)) }.toSet shouldBe
+      runLog { s1.get }.toSet
+    }
+
+    "join (3)" in forAll { (s1: PureStream[PureStream[Int]], n: SmallPositive) =>
+      runLog { concurrent.join(n.get)(s1.get.map(_.get.covary[Task]).covary[Task]) }.toSet shouldBe
+      runLog { s1.get.flatMap(_.get) }.toSet
+    }
+
+    "merge (left/right failure)" in forAll { (s1: PureStream[Int], f: Failure) =>
+      an[Err.type] should be thrownBy {
+        s1.get.merge(f.get).run.run.unsafeRun
+      }
+    }
+
+    "hanging awaits" - {
+
+      val full = Stream.constant[Task,Int](42)
+      val hang = Stream.repeatEval(Task.unforkedAsync[Unit] { cb => () }) // never call `cb`!
+      val hang2: Stream[Task,Nothing] = full.drain
+      val hang3: Stream[Task,Nothing] =
+        Stream.repeatEval[Task,Unit](Task.async { cb => cb(Right(())) }).drain
+
+      "merge" in {
+        runLog((full merge hang).take(1)) shouldBe Vector(42)
+        runLog((full merge hang2).take(1)) shouldBe Vector(42)
+        runLog((full merge hang3).take(1)) shouldBe Vector(42)
+        runLog((hang merge full).take(1)) shouldBe Vector(42)
+        runLog((hang2 merge full).take(1)) shouldBe Vector(42)
+        runLog((hang3 merge full).take(1)) shouldBe Vector(42)
+      }
+
+      "join" in {
+        runLog(concurrent.join(10)(Stream(full, hang)).take(1)) shouldBe Vector(42)
+        runLog(concurrent.join(10)(Stream(full, hang2)).take(1)) shouldBe Vector(42)
+        runLog(concurrent.join(10)(Stream(full, hang3)).take(1)) shouldBe Vector(42)
+        runLog(concurrent.join(10)(Stream(hang3,hang2,full)).take(1)) shouldBe Vector(42)
+      }
+    }
   }
-
-  property("merge") = forAll { (s1: PureStream[Int], s2: PureStream[Int]) =>
-    run { s1.get.merge(s2.get.covary[Task]) }.toSet ?=
-    (run(s1.get).toSet ++ run(s2.get).toSet)
-  }
-
-  property("merge (left/right identity)") = forAll { (s1: PureStream[Int]) =>
-    (run { s1.get.merge(Stream.empty.covary[Task]) } ?= run(s1.get)) &&
-    (run { Stream.empty.pipe2(s1.get.covary[Task])(wye.merge) } ?= run(s1.get))
-  }
-
-  property("merge/join consistency") = forAll { (s1: PureStream[Int], s2: PureStream[Int]) =>
-    run { s1.get.pipe2v(s2.get.covary[Task])(wye.merge) }.toSet ?=
-    run { concurrent.join(2)(Stream(s1.get.covary[Task], s2.get.covary[Task])) }.toSet
-  }
-
-  property("join (1)") = forAll { (s1: PureStream[Int]) =>
-    run { concurrent.join(1)(s1.get.covary[Task].map(Stream.emit)) } ?= run { s1.get }
-  }
-
-  property("join (2)") = forAll { (s1: PureStream[Int], n: SmallPositive) =>
-    run { concurrent.join(n.get)(s1.get.covary[Task].map(Stream.emit)) }.toSet ?=
-    run { s1.get }.toSet
-  }
-
-  property("join (3)") = forAll { (s1: PureStream[PureStream[Int]], n: SmallPositive) =>
-    run { concurrent.join(n.get)(s1.get.map(_.get.covary[Task]).covary[Task]) }.toSet ?=
-    run { s1.get.flatMap(_.get) }.toSet
-  }
-
-  property("merge (left/right failure)") = forAll { (s1: PureStream[Int], f: Failure) =>
-    try { run (s1.get merge f.get); false }
-    catch { case Err => true }
-  }
-
-  //property("join (failure 1)") = forAll { (s: PureStream[Failure], n: SmallPositive, f: Failure) =>
-  //  run { concurrent.join(n.get)(s.get) }
-  //}
 }

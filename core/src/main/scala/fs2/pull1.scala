@@ -1,8 +1,5 @@
 package fs2
 
-import Step._
-import fs2.util.NotNothing
-
 private[fs2] trait pull1 {
   import Stream.Handle
 
@@ -182,6 +179,29 @@ private[fs2] trait pull1 {
     if (n <= 0) Pull.pure(h)
     else Pull.awaitLimit(if (n <= Int.MaxValue) n.toInt else Int.MaxValue)(h).flatMap {
       case chunk #: h => Pull.output(chunk) >> take(n - chunk.size.toLong)(h)
+    } 
+
+  /** Emits the last `n` elements of the input. */
+  def takeRight[F[_],I](n: Long)(h: Handle[F,I]): Pull[F,Nothing,Vector[I]]  = {
+    def go(acc: Vector[I])(h: Handle[F,I]): Pull[F,Nothing,Vector[I]] = {
+      Pull.awaitN(if (n <= Int.MaxValue) n.toInt else Int.MaxValue, true)(h).optional.flatMap {
+        case None => Pull.pure(acc)
+        case Some(cs #: h) =>
+          val vector = cs.toVector.flatMap(_.toVector)
+          go(acc.drop(vector.length) ++ vector)(h)
+      }
+    }
+    if (n <= 0) Pull.pure(Vector())
+    else go(Vector())(h)
+  }
+
+  /** Like `takeWhile`, but emits the first value which tests false. */
+  def takeThrough[F[_],I](p: I => Boolean): Handle[F,I] => Pull[F,I,Handle[F,I]] =
+    receive { case chunk #: h =>
+      chunk.indexWhere(!p(_)) match {
+        case Some(i) => Pull.output(chunk.take(i+1)) >> Pull.pure(h.push(chunk.drop(i+1)))
+        case None => Pull.output(chunk) >> takeThrough(p)(h)
+      }
     }
 
   /**
