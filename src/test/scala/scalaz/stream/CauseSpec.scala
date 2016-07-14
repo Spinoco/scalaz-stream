@@ -559,5 +559,10 @@ class CauseSpec extends Properties("cause") {
     source.chunkAll.once.attempt().runLog.run ?= Vector(-\/(Bwahahaa))
   }
 
+  property("receive1.propagates.failure") = protect {
+    val source:Process[Task,Int] = fail(Bwahahaa)
+    source.pipe(receive1Or[Int,Int](emit(999))(emit)).attempt().runLog.run ?= Vector(-\/(Bwahahaa))
+  }
+
 
 }

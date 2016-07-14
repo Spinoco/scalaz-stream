@@ -907,8 +907,12 @@ object Process extends ProcessInstances {
     await(Get[I])(rcv)
 
   /** Like `receive1`, but consults `fb` when it fails to receive an input. */
-  def receive1Or[I, O](fb: => Process1[I, O])(rcv: I => Process1[I, O]): Process1[I, O] =
-    awaitOr(Get[I])((rsn: EarlyCause) => fb.causedBy(rsn))(rcv)
+  def receive1Or[I, O](fb: => Process1[I, O])(rcv: I => Process1[I, O]): Process1[I, O] = {
+    awaitOr(Get[I])({
+      case Cause.Kill => fb.causedBy(Cause.Kill)
+      case err:Cause.Error => fb.drain.causedBy(err)
+    })(rcv)
+  }
 
   /**
    * Delay running `p` until `awaken` becomes true for the first time.
