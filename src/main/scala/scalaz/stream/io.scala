@@ -293,7 +293,7 @@ object io {
                 go(offset, length, read)
             } else {
               val chunk = chunks.head
-              val remaining = chunk.length - index
+              val remaining = (chunk.length - index).toInt
 
               if (length <= remaining) {
                 chunk.copyToArray(buffer, offset, index, length)

@@ -172,7 +172,7 @@ object tcp {
            allowPeerClosed: Boolean = false): Process[Connection,Option[ByteVector]] =
     available(numBytes, timeout, allowPeerClosed) flatMap {
       _ map { bs => if (bs.size == numBytes) Process.emit(Some(bs))
-                    else read(numBytes - bs.size, timeout, allowPeerClosed).map(_.map(bs ++ _))
+                    else read(numBytes - bs.size.toInt, timeout, allowPeerClosed).map(_.map(bs ++ _))
             } getOrElse (Process.emit(None))
     }
 
