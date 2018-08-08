@@ -114,13 +114,13 @@ sealed trait Process[+F[_], +O]
    * Note that this function may be used to swallow or handle errors.
    */
   final def onHalt[F2[x] >: F[x], O2 >: O](f: Cause => Process[F2, O2]): Process[F2, O2] = {
-     val next = (t: Cause) => Trampoline.delay(Try(f(t)))
-     this match {
-       case (append: Append[F2, O2] @unchecked) => Append(append.head, append.stack :+ next)
-       case emt@Emit(_)        => Append(emt, Vector(next))
-       case awt@Await(_, _, _) => Append(awt, Vector(next))
-       case hlt@Halt(rsn)      => Append(hlt, Vector(next))
-     }
+    val next: Cause => Trampoline[Process[F2, O2]] = (t: Cause) => Trampoline.delay(Try(f(t)))
+    this match {
+      case Append(head, stack) => Append(head, stack :+ next)
+      case emt@Emit(_)        => Append(emt, Vector(next))
+      case awt@Await(_, _, _) => Append(awt, Vector(next))
+      case hlt@Halt(rsn)      => Append(hlt, Vector(next))
+    }
   }
 
 
@@ -460,7 +460,7 @@ sealed trait Process[+F[_], +O]
     case Step(head, next) => head match {
       case Emit(as) => as.headOption.map(x => F.point[Option[(O2, Process[F2, O2])]](Some((x, Process.emitAll[O2](as drop 1) +: next)))) getOrElse
           next.continue.unconsOption
-      case await: Await[F2, _, O2] => await.evaluate.flatMap(p => (p +: next).unconsOption(F,C))
+      case awt@Await(_, _, _) => awt.evaluate[F2, O2].flatMap(p => (p +: next).unconsOption(F,C))
     }
     case Halt(cause) => cause match {
       case End | Kill => F.point(None)
@@ -1136,15 +1136,6 @@ object Process extends ProcessInstances {
     def liftIO: Process[Task, O] = self
   }
 
-  val AsyncLogger = java.util.logging.Logger.getLogger("spinoco.process.async")
-
-  private def dump(s:String, pars : => Seq[Any]):Unit = {
-    if (AsyncLogger.getLevel == Level.FINEST) {
-      println(Thread.currentThread().getName + "| " + s +  ": " + pars.toString)
-    }
-  }
-
-
   /**
    * Syntax for processes that have its effects wrapped in Task
    */
@@ -1263,14 +1254,12 @@ object Process extends ProcessInstances {
 
                   // interrupted via the `Task.fail` defined in `checkInterrupt`
                   case Some(-\/(PreStepAbort(cause: EarlyCause))) =>
-                    dump("Invoked PreStepAbort", Seq(cause))
                     preStep(cause)
 
                   case result => {
 
                     val inter = interrupted.get().toOption
 
-                    dump("Invoked handle with result", Seq(result, inter, barrier.get()))
                     assert(!inter.isEmpty || result.isDefined)
 
                     // interrupted via the callback mechanism, checked in `completeInterruptibly`
@@ -1295,15 +1284,9 @@ object Process extends ProcessInstances {
                           result map { either =>
                             either match {
                               case -\/(t) =>
-                                println("UNEXPECTED UNHANDLED IN RUN-ASYNC: " +  t.getMessage)
-                                t.printStackTrace()
-                                println(">>>" + result)
-                                println("~~~" + inter)
-                                println("---"*50)
                                 ()       // I guess we just swallow the exception here? no idea what to do, since we don't have a handler for this case
                               case \/-(r) =>
                                 val np = Try(cln(r).run)
-                                dump("post step invoking", Seq(np, np.step, cause))
                                 postStep(np, cause)     // produce the preemption handler, given the resulting resource
                             }
                           }
@@ -1324,7 +1307,6 @@ object Process extends ProcessInstances {
                                     case Some(head) => completed(head +: cont)
 
                                     case None =>
-                                      println("DOUBLE-NONE BUG COMPLETED INTERRUPTIBLY 1")
                                       ???      // didn't match any condition; fail! (probably a double-None bug in completeInterruptibly)
                                   }
                                 }
@@ -1336,7 +1318,6 @@ object Process extends ProcessInstances {
                                   handle(preStep = preStep, midStep = midStep, postStep = postStep, exceptional = exceptional, completed = completed)(result)
 
                                 case None =>
-                                  println("DOUBLE-NONE BUG COMPLETED INTERRUPTIBLY 2")
                                   ???        // wtf?! (apparently we were called twice with None; bug in completeInterruptibly)
                               }
                             }
